@@ -169,6 +169,9 @@ def test_auto_stop_silence_and_app_quit(monkeypatch):
 def test_running_meeting_apps(monkeypatch):
     from tingo import record
 
+    # 这个用例模拟 macOS 的 ps 输出；显式固定平台，避免在 Windows 上误走 tasklist 分支
+    monkeypatch.setattr(record.platform, "system", lambda: "Darwin")
+
     ps = (
         "/sbin/launchd\n/Applications/zoom.us.app/Contents/MacOS/zoom.us\n"
         "/Applications/腾讯会议.app/Contents/MacOS/腾讯会议\n/Applications/Microsoft Teams.app/Contents/MacOS/MSTeams\n"

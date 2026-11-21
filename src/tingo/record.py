@@ -1,4 +1,4 @@
-"""录音：macOS 用 ScreenCaptureKit 录系统声音 + 麦克风，其他情况退回 ffmpeg 只录麦克风。"""
+"""录音：macOS 用 ScreenCaptureKit；Windows 用 ffmpeg dshow（WASAPI loopback）录系统声音 + 麦克风；其他平台退回 ffmpeg 只录麦克风。"""
 
 from __future__ import annotations
 
@@ -33,10 +33,18 @@ def html_to_pdf(html: str, out: Path) -> None:
 
 
 def system_audio_supported() -> bool:
-    if platform.system() != "Darwin":
-        return False
-    major = int(platform.mac_ver()[0].split(".")[0] or 0)
-    return major >= 15 and shutil.which("swiftc") is not None
+    system = platform.system()
+    if system == "Windows":
+        # Windows 的"系统声音"靠 dshow 回环设备（立体声混音 / VB-CABLE），本质是 WASAPI loopback
+        if shutil.which("ffmpeg") is None:
+            return False
+        from . import windows_audio
+
+        return windows_audio.system_audio_supported()
+    if system == "Darwin":
+        major = int(platform.mac_ver()[0].split(".")[0] or 0)
+        return major >= 15 and shutil.which("swiftc") is not None
+    return False
 
 
 def ensure_recorder() -> Path:
@@ -60,11 +68,14 @@ class Recording:
         self.system_audio = system_audio and system_audio_supported()
         self.mic = mic
         self.proc: subprocess.Popen | None = None
+        self._procs: list[subprocess.Popen] = []  # Windows 下两路 dshow 各自一个进程
         self.started_at = 0.0
 
     def start(self) -> None:
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        if self.system_audio:
+        if platform.system() == "Windows":
+            self._start_windows()
+        elif self.system_audio:
             cmd = [str(ensure_recorder()), str(self.out_dir)] + ([] if self.mic else ["--no-mic"])
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, start_new_session=True)
             line = self.proc.stdout.readline().strip()
@@ -90,8 +101,60 @@ class Recording:
             )
         self.started_at = time.time()
 
+    def _start_windows(self) -> None:
+        """Windows：每个音源一个 ffmpeg dshow 进程，写 system.wav / mic.wav。"""
+        from . import windows_audio
+
+        if not self.system_audio and not self.mic:
+            raise RuntimeError("系统声音和麦克风至少开一个")
+        jobs: list[tuple[str, str]] = []
+        if self.system_audio:
+            dev = windows_audio.pick_system_device()
+            if not dev:
+                raise RuntimeError(
+                    "找不到系统声音回环设备。请启用声卡的「立体声混音 / Stereo Mix」，"
+                    "或安装 VB-CABLE；也可用环境变量 TINGO_SYSTEM_DEVICE 指定设备名"
+                )
+            jobs.append((dev, str(self.out_dir / "system.wav")))
+        if self.mic:
+            dev = windows_audio.pick_mic_device()
+            if not dev:
+                raise RuntimeError(
+                    "找不到麦克风。可用环境变量 TINGO_MIC_DEVICE 指定设备名；"
+                    "用 `tingo devices` 列出所有音频设备"
+                )
+            jobs.append((dev, str(self.out_dir / "mic.wav")))
+
+        for dev, out_wav in jobs:
+            cmd = windows_audio.build_dshow_cmd(dev, out_wav)
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            self._procs.append(proc)
+            self.proc = proc  # 便于 record_until_interrupt 检查是否提前退出
+            # 给设备一点启动时间；dshow 打不开（被占用/权限）会很快退出
+            time.sleep(0.4)
+            if proc.poll() is not None:
+                tail = (proc.stderr.read().decode("utf-8", "replace") if proc.stderr else "").strip()
+                self.stop_capture()
+                raise RuntimeError(f"无法打开音频设备「{dev}」：{tail or '设备被占用或不存在'}")
+
     def elapsed(self) -> float:
         return time.time() - self.started_at if self.started_at else 0.0
+
+    def exited(self) -> str | None:
+        """任一录音进程提前退出时返回错误信息，否则 None。Windows 多路 ffmpeg 都能检出。"""
+        procs = self._procs or ([self.proc] if self.proc else [])
+        for proc in procs:
+            if proc.poll() not in (None, 0):
+                stream = proc.stderr if platform.system() == "Windows" else proc.stdout
+                tail = ""
+                if stream:
+                    try:
+                        raw = stream.read() or ""
+                        tail = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+                    except (OSError, ValueError):
+                        tail = ""
+                return tail.removeprefix("ERROR: ").strip() or "录音组件意外退出"
+        return None
 
     @property
     def sources(self) -> list[str]:
@@ -104,15 +167,27 @@ class Recording:
 
     def stop_capture(self) -> None:
         """只停止录音进程，原始音轨留着（边录边转还要读最后几秒）。"""
-        if self.proc and self.proc.poll() is None:
-            if self.system_audio:
-                self.proc.send_signal(signal.SIGINT)
-            else:
-                self.proc.communicate(b"q", timeout=10)  # 让 ffmpeg 正常写完文件头
-            try:
-                self.proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+        procs = self._procs or ([self.proc] if self.proc else [])
+        for proc in procs:
+            if proc.poll() is None:
+                # Windows 的 ffmpeg 靠 stdin 的 q 收尾；SIGINT 在 Windows 上语义不同，统一用 q
+                if platform.system() == "Windows":
+                    try:
+                        proc.communicate(b"q", timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                elif self.system_audio and proc is self.proc and not self._procs:
+                    proc.send_signal(signal.SIGINT)  # Swift 录音组件
+                else:
+                    try:
+                        proc.communicate(b"q", timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        self._procs.clear()
 
 
 def _mic_input() -> list[str]:
@@ -121,7 +196,7 @@ def _mic_input() -> list[str]:
         return ["-f", "avfoundation", "-i", ":default"]
     if system == "Linux":
         return ["-f", "pulse", "-i", "default"]
-    raise RuntimeError("当前系统暂不支持直接录音，请先用会议软件录制，再用 `tingo run <音频文件>` 处理")
+    raise RuntimeError("Windows 请走 dshow 后端（Recording._start_windows）")
 
 
 def mixdown(out_dir: Path) -> Path:
@@ -244,15 +319,12 @@ def record_until_interrupt(
         if live_factory:
             live = live_factory(rec.sources)
             live.start()
-        while not stop and rec.proc.poll() is None:
+        while not stop and all(p.poll() is None for p in (rec._procs or ([rec.proc] if rec.proc else []))):
             on_tick(rec.elapsed())
             time.sleep(0.2)
         if on_stopping:
             on_stopping()
-        error = None
-        if rec.proc.poll() not in (None, 0):
-            tail = rec.proc.stdout.read().strip() if rec.proc.stdout else ""
-            error = tail.removeprefix("ERROR: ") or "录音组件意外退出"
+        error = rec.exited()
         rec.stop_capture()
         return out_dir, error, live
     finally:
@@ -386,6 +458,7 @@ MEETING_APPS = (
     "飞书",
     "Microsoft Teams",
     "MSTeams",
+    "Teams",  # Windows tasklist 里 Microsoft Teams 的进程名
     "DingTalk",
     "钉钉",
     "Webex",
@@ -400,12 +473,21 @@ SECONDS_PER_MIN = 60.0  # 测试里改小
 
 
 def running_meeting_apps() -> set[str]:
-    """正在运行的会议软件（小写的进程名）。ps 跑不了时返回空集合。"""
+    """正在运行的会议软件（小写的进程名）。ps / tasklist 跑不了时返回空集合。"""
     try:
-        out = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True, timeout=5, check=False).stdout
+        if platform.system() == "Windows":
+            out = subprocess.run(
+                ["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=5, check=False
+            ).stdout
+            # CSV 第一列是带引号的进程名，如 "TencentMeeting.exe"
+            names = {line.split(",")[0].strip().strip('"').lower().removesuffix(".exe") for line in out.splitlines() if line.strip()}
+        else:
+            out = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True, timeout=5, check=False).stdout
+            names = {line.strip().rsplit("/", 1)[-1].strip().lower() for line in out.splitlines() if line.strip()}
     except (OSError, subprocess.SubprocessError):
         return set()
-    names = {line.strip().rsplit("/", 1)[-1].strip().lower() for line in out.splitlines() if line.strip()}
+    # TencentMeeting.exe → TencentMeeting；同时兼容 ps 给的完整名
+    names = names | {n.removesuffix(".exe") for n in names}
     return names & _MEETING_APPS
 
 
@@ -466,6 +548,17 @@ def _capture_once(out_dir: Path, seconds: float, system: bool) -> str | None:
     """用录音组件录 seconds 秒（system=False 时只录麦克风），返回错误信息或 None。"""
     import threading
 
+    if platform.system() == "Windows":
+        # Windows：真的去开系统声音回环设备探测（system=True 时），不能退化成只录麦克风
+        rec = Recording(out_dir, system_audio=system, mic=True)
+        try:
+            rec.start()
+        except Exception as e:  # noqa: BLE001
+            return str(e) or e.__class__.__name__
+        time.sleep(seconds)
+        err = rec.exited()
+        rec.stop_capture()
+        return err
     if platform.system() != "Darwin":
         rec = Recording(out_dir, system_audio=False, mic=True)
         try:

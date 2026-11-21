@@ -185,7 +185,15 @@ def record(
     out_dir = out or new_folder(DEFAULT_ROOT, title, started)
     system = not no_system
     if system and not system_audio_supported():
-        console.print("[yellow]![/yellow] 录系统声音需要 macOS 15+ 和 Xcode Command Line Tools，本次只录麦克风")
+        import sys
+
+        if sys.platform == "win32":
+            console.print(
+                "[yellow]![/yellow] 没找到系统声音回环设备（立体声混音/VB-CABLE），本次只录麦克风；"
+                "用 `tingo devices` 查看设备"
+            )
+        else:
+            console.print("[yellow]![/yellow] 录系统声音需要 macOS 15+ 和 Xcode Command Line Tools，本次只录麦克风")
         system = False
     words = config.load().hotwords + _split(hotwords)
 
@@ -345,10 +353,17 @@ def doctor() -> None:
 
     check("ffmpeg", shutil.which("ffmpeg") is not None, "brew install ffmpeg / apt install ffmpeg")
     sys_audio = system_audio_supported()
+    import sys
+
+    no_sys_hint = (
+        "需要立体声混音或 VB-CABLE 回环设备，用 `tingo devices` 查看；不影响处理录音文件"
+        if sys.platform == "win32"
+        else "需要 macOS 15+ 和 swiftc（xcode-select --install）；不影响处理录音文件"
+    )
     console.print(
         ("[green]✓[/green]" if sys_audio else "[yellow]![/yellow]")
         + " 录系统声音"
-        + ("" if sys_audio else "  [dim]需要 macOS 15+ 和 swiftc（xcode-select --install）；不影响处理录音文件[/dim]")
+        + ("" if sys_audio else f"  [dim]{no_sys_hint}[/dim]")
     )
     cache = Path(os.environ.get("MODELSCOPE_CACHE", Path.home() / ".cache" / "modelscope"))
     models = any(cache.glob("**/*speech_seaco_paraformer*"))
@@ -376,6 +391,30 @@ def doctor() -> None:
     else:
         check("大模型", False, "未配置 API key，运行 `tingo config`")
     raise typer.Exit(0 if ok else 1)
+
+
+@app.command()
+def devices() -> None:
+    """列出可用的录音设备（Windows：dshow 音频设备，含系统声音回环与麦克风）。"""
+    import sys
+
+    if sys.platform != "win32":
+        console.print("[yellow]![/yellow] `devices` 目前只支持 Windows；macOS 用系统声音无需手动选设备")
+        raise typer.Exit(0)
+    from . import windows_audio
+
+    devs = windows_audio.enumerate_devices()
+    audios = [d for d in devs if d.is_audio]
+    if not audios:
+        console.print("[red]✗[/red] 没有枚举到音频设备，请确认 ffmpeg 已安装")
+        raise typer.Exit(1)
+    console.print("[bold]音频设备[/bold]（录系统声音认准「立体声混音 / CABLE Output」，录麦克风认准「麦克风」）：")
+    for d in audios:
+        tag = "[cyan]系统声音[/cyan]" if windows_audio.is_system_device(d.name) else "[green]麦克风[/green]"
+        console.print(f"  · {d.name}  {tag}")
+    console.print("\n设置（写入环境变量，或加到配置文件）：")
+    console.print("  [dim]TINGO_SYSTEM_DEVICE=\"立体声混音 (Realtek(R) Audio)\"[/dim]")
+    console.print("  [dim]TINGO_MIC_DEVICE=\"麦克风阵列 (...)\"[/dim]")
 
 
 @app.command()
