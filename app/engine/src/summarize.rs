@@ -17,27 +17,28 @@ const SYSTEM: &str =
 
 const MINUTES_PROMPT: &str = "下面是一场会议的语音转写，格式为「[时间戳] 说话人：内容」。会议日期：{meeting_date}。
 
-请整理成会议纪要，严格使用以下 Markdown 结构，不要输出其他内容：
+请整理成一份专业、可读的会议纪要，严格使用以下 Markdown 结构，不要输出其他内容：
 
 # <根据内容拟一个会议标题>
 
 ## 一句话总结
-<一句话>
+<用一句话点明会议结论：做出了什么决定、达成了什么结果。不要写\"讨论了……\"，要写结论本身。>
 
 ## 议题与讨论
-### 1. <议题>
-- <要点>（[mm:ss]）
+### 1. <议题：用名词短语概括，如\"客户采购选型\"，不超过 12 字>
+- <要点：一个完整的结论句，包含关键数字、人名、状态。合并同一主题的零散发言，不要逐句罗列。>
+- <要点：只写有信息量的内容，删掉重复和铺垫。>
 
 ## 决议
-- <已经拍板的事项>（[mm:ss]）
+- <明确拍板的事项，写清\"谁、做什么、到什么程度\"。没有就写\"无\"。>
 
 ## 待办
-| 事项 | 负责人 | 截止时间 | 出处 |
-|---|---|---|---|
-| <具体动作> | <人名或说话人> | <时间> | [mm:ss] |
+| 事项 | 负责人 | 截止时间 |
+|---|---|---|
+| <动词开头的具体动作，可执行、可验收> | <人名或\"未明确\"> | <具体日期或\"未明确\"> |
 
 ## 待定问题与风险
-- <没有结论的问题、提到的风险>
+- <没有结论的问题、提到的风险，写清卡在谁那里、需要什么才能推进>
 
 ## 原因分析
 ```fishbone
@@ -52,9 +53,9 @@ const MINUTES_PROMPT: &str = "下面是一场会议的语音转写，格式为�
 1. 只依据转写内容，不编造。负责人或截止时间没有明确说出的，写\"未明确\"。
 2. 转写有同音错字，结合上下文改正明显的错误；拿不准的保留原文。
 3. 转写里的\"下周五\"\"明天\"等已由程序标好具体日期，如\"下周五（11月13日）\"，照抄括号里的日期，不要自己推算。其他相对时间（如\"十五号\"）保留原话，并查上面的日期对照表在括号里写出具体日期。
-4. 每条要点、决议、待办都附上出处时间戳，便于回听核对。
-5. 某一节没有内容时写\"无\"，不要删掉这一节（「原因分析」除外，见第 7 条）。
-6. 去掉寒暄和口头禅，语言简洁、书面化。
+4. **不要在正文里输出任何时间戳**——纪要里不写 mm:ss，也不要引用原话时间。时间戳只用于鱼骨图的 refs 字段（见第 7 条）。
+5. 质量优先：把口语、寒暄、重复、试探性表达提炼成书面结论；同一议题的多条发言合并成 1～3 条要点；保留关键数字、金额、日期、人名、状态；删掉没有信息量的过程描述。每条要点都要能独立读懂。
+6. 某一节没有内容时写\"无\"，不要删掉这一节（「原因分析」除外，见第 7 条）。待办表没有事项时写一行\"| 无 | — | — |\"。
 7. 只有会议里明确分析了某个问题的原因时，才写「原因分析」这一节：每个问题一个 fishbone 代码块（最多两个），每块 2～6 个分支，内容是合法 JSON。refs 填支撑这个原因的原话的时间戳，必须是上面转写里出现过的 [mm:ss]（不带方括号）；找不到原话支撑就留空数组，不要编。没有分析原因的会议，整节省略，不要写\"无\"。
 8. 全文最后（鱼骨图之后）必须原样输出 terms 代码块：列出会上出现的人名、产品、项目、专有名词的正确写法（优先用术语表、热词里的写法），variants 写转写里出现过的听错的写法（没有就写空数组）；最多 30 个；一个都没有时写 {\"terms\": []}。纪要正文里一律用正确写法。{glossary}{translate}
 
@@ -65,13 +66,13 @@ const MINUTES_PROMPT: &str = "下面是一场会议的语音转写，格式为�
 const CHUNK_PROMPT: &str = "下面是一场长会议中的一段转写（第 {index}/{total} 段），格式为「[时间戳] 说话人：内容」。会议日期：{meeting_date}。
 
 请提炼这一段的：讨论要点、已拍板的决议、待办（事项/负责人/截止时间）、待定问题与风险。
-每条都附出处时间戳 [mm:ss]，只依据原文，不编造，用简洁的条目输出。{glossary}{translate}
+只依据原文，不编造，把口语提炼成书面结论，合并同一主题的零散发言，保留关键数字和人名。不要输出时间戳。{glossary}{translate}
 
 转写：
 {transcript}
 ";
 
-const REDUCE_PROMPT: &str = "下面是一场长会议按时间顺序分段提炼的笔记。请把它们合并成一份完整的会议纪要，去重、按议题归并，保留出处时间戳。
+const REDUCE_PROMPT: &str = "下面是一场长会议按时间顺序分段提炼的笔记。请把它们合并成一份专业、可读的会议纪要：去重、按议题归并、同类要点合并成结论句，语言书面化。
 
 {instructions}
 
@@ -84,27 +85,28 @@ speech-recognition errors and all, into clear, professional meeting minutes.";
 
 const MINUTES_PROMPT_EN: &str = "Below is the speech-recognition transcript of a meeting, one line per turn in the form \"[timestamp] Speaker: content\". Meeting date: {meeting_date}
 
-Write the meeting minutes using exactly the following Markdown structure, and output nothing else:
+Write a professional, readable set of meeting minutes using exactly the following Markdown structure, and output nothing else:
 
 # <a short title>
 
 ## Summary
-<one sentence>
+<One sentence stating the outcome: what was decided or achieved. Not \"we discussed X\", but the conclusion itself.>
 
 ## Discussion
-### 1. <topic>
-- <key point> ([mm:ss])
+### 1. <topic: a noun phrase, e.g. \"Vendor selection\", max 8 words>
+- <A complete conclusion sentence with key numbers, names and status. Merge scattered remarks on the same topic; do not list every utterance.>
+- <Only information-dense points; remove repetition and build-up.>
 
 ## Decisions
-- <what was decided> ([mm:ss])
+- <Clearly settled items: who does what and to what extent. Write \"None\" if there are none.>
 
 ## Action Items
-| Item | Owner | Due | Source |
-|---|---|---|---|
-| <concrete action> | <name or speaker> | <date> | [mm:ss] |
+| Item | Owner | Due |
+|---|---|---|
+| <verb-first, concrete, verifiable action> | <name or \"Not specified\"> | <actual date or \"Not specified\"> |
 
 ## Open Questions & Risks
-- <unresolved questions, risks raised>
+- <Unresolved questions and risks; state whose block it is and what is needed to move forward>
 
 ## Root Cause Analysis
 ```fishbone
@@ -119,9 +121,9 @@ Rules:
 1. Use only what is in the transcript; do not make anything up. If an owner or a due date was not stated explicitly, write \"Not specified\".
 2. The transcript has recognition errors (homophones, misheard words). Fix obvious ones from context; keep the original wording when unsure.
 3. Chinese relative dates such as \"下周五\" or \"明天\" have already been annotated by the program with the actual date, e.g. \"下周五（11月13日）\"; use the date in the brackets instead of working it out yourself. For any other relative date (e.g. \"next Wednesday\", \"the 15th\"), keep the original wording and add the actual date in parentheses, looked up in the calendar above, e.g. \"next Wednesday (Nov 4)\".
-4. End every key point, decision and action item with its source timestamp, so it can be checked against the recording.
-5. If a section has nothing, write \"None\" rather than dropping the section (except \"Root Cause Analysis\", see rule 7).
-6. Leave out small talk and filler words; keep the language concise and formal.
+4. **Do not output any timestamps in the body** — no mm:ss in the minutes, no quoting a speaker's time. Timestamps are only for fishbone refs (see rule 7).
+5. Quality first: turn colloquial speech, greetings, repetition and tentative phrasing into written conclusions; merge multiple remarks on one topic into 1-3 points; keep key numbers, amounts, dates, names and status; drop process descriptions with no information. Every point must be understandable on its own.
+6. If a section has nothing, write \"None\" rather than dropping the section (except \"Root Cause Analysis\", see rule 7). If there are no action items, write one row \"| None | — | — |\".
 7. Only include the \"Root Cause Analysis\" section when the meeting explicitly analyzed the causes of a problem: one fishbone code block per problem (at most two), 2-6 branches each, valid JSON. In refs, put the timestamps of the lines that support the cause; they must be [mm:ss] timestamps that appear in the transcript below (without the brackets). If no line supports it, leave refs as an empty array; do not invent one. If the meeting did not analyze causes, omit the whole section; do not write \"None\".
 8. At the very end (after the fishbone), always output the terms code block exactly as shown above: list the correct spelling of the names of people, products, projects and other proper nouns that came up in the meeting (prefer the spelling in the glossary / hotwords), and in variants put the misheard spellings that appear in the transcript (an empty array if none); at most 30 entries; if there are none, write {\"terms\": []}. Always use the correct spelling in the body of the minutes.{glossary}{translate}
 
@@ -132,13 +134,13 @@ Transcript:
 const CHUNK_PROMPT_EN: &str = "Below is one part (part {index} of {total}) of the transcript of a long meeting, one line per turn in the form \"[timestamp] Speaker: content\". Meeting date: {meeting_date}
 
 Extract from this part: key discussion points, decisions made, action items (item / owner / due date), and open questions & risks.
-End every entry with its source timestamp [mm:ss]. Use only what is in the transcript, do not make anything up, and output concise bullet points.{glossary}{translate}
+Use only what is in the transcript, do not make anything up; turn colloquial speech into written conclusions, merge scattered remarks on the same topic, keep key numbers and names. Do not output timestamps.{glossary}{translate}
 
 Transcript:
 {transcript}
 ";
 
-const REDUCE_PROMPT_EN: &str = "Below are notes taken part by part, in chronological order, from a long meeting. Merge them into one complete set of meeting minutes: remove duplicates, group points by topic, and keep the source timestamps.
+const REDUCE_PROMPT_EN: &str = "Below are notes taken part by part, in chronological order, from a long meeting. Merge them into one professional, readable set of meeting minutes: remove duplicates, group points by topic, merge related points into conclusion sentences, and keep the language formal.
 
 {instructions}
 
@@ -931,8 +933,8 @@ mod tests {
             "### 1. <topic>",
             "## Decisions",
             "## Action Items",
-            "| Item | Owner | Due | Source |",
-            "|---|---|---|---|",
+            "| Item | Owner | Due |",
+            "|---|---|---|",
             "## Open Questions & Risks",
             "## Root Cause Analysis",
             "```fishbone",

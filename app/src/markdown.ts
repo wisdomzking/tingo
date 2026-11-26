@@ -6,19 +6,28 @@ import { parseFishbone, parseTerms, renderFishbone, type Resolver } from "./fish
 
 const TS = String.raw`\d{1,2}:\d{2}(?::\d{2})?`;
 
-function inline(s: string): string {
-  return esc(s)
+/** hideTs=true（纪要正文）：把 [mm:ss] 连同括号一起删掉；否则渲染成可点的时间戳按钮。 */
+function inline(s: string, hideTs = false): string {
+  let out = esc(s)
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(new RegExp(String.raw`\s*[（(]\s*\[(${TS})\]\s*[）)]`, "g"), "[$1]")
-    .replace(new RegExp(String.raw`\[(${TS})\]`, "g"), (_, t: string) => `<button class="ts" data-ms="${tsToMs(t)}">${t}</button>`);
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+  if (hideTs) {
+    out = out
+      .replace(new RegExp(String.raw`\s*[（(]\s*\[${TS}\]\s*[）)]`, "g"), "")
+      .replace(new RegExp(String.raw`\s*\[${TS}\]`, "g"), "");
+  } else {
+    out = out
+      .replace(new RegExp(String.raw`\s*[（(]\s*\[(${TS})\]\s*[）)]`, "g"), "[$1]")
+      .replace(new RegExp(String.raw`\[(${TS})\]`, "g"), (_, t: string) => `<button class="ts" data-ms="${tsToMs(t)}">${t}</button>`);
+  }
+  return out;
 }
 
 const LIST = /^\s*([-*]|\d+\.)\s+/;
 
 export function renderMarkdown(
   md: string,
-  { skipHead = false, resolve, en }: { skipHead?: boolean; resolve?: Resolver; en?: boolean } = {},
+  { skipHead = false, resolve, en, hideTs = false }: { skipHead?: boolean; resolve?: Resolver; en?: boolean; hideTs?: boolean } = {},
 ): string {
   const lines = md.replace(/\r/g, "").split("\n");
   const out: string[] = [];
@@ -54,7 +63,7 @@ export function renderMarkdown(
             .join("")}</div></div>`);
       } else if (lang === "fishbone") {
         const spec = closed ? parseFishbone(body.join("\n")) : null;
-        out.push(spec ? renderFishbone(spec, resolve, en) : closed ? "" : `<div class="fishbone pending">${t("正在画鱼骨图…", "Drawing the fishbone…")}</div>`);
+        out.push(spec ? renderFishbone(spec, hideTs ? undefined : resolve, en) : closed ? "" : `<div class="fishbone pending">${t("正在画鱼骨图…", "Drawing the fishbone…")}</div>`);
       } else {
         out.push(`<pre><code>${esc(body.join("\n"))}</code></pre>`);
       }
@@ -64,7 +73,7 @@ export function renderMarkdown(
     const h = /^(#{1,3})\s+(.*)$/.exec(line);
     if (h) {
       // 详情页的标题和"日期/时长/参会人"已经在页头显示，跳过
-      if (!(skipHead && h[1].length === 1)) out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`);
+      if (!(skipHead && h[1].length === 1)) out.push(`<h${h[1].length}>${inline(h[2], hideTs)}</h${h[1].length}>`);
       afterH1 = h[1].length === 1;
       i++;
       continue;
@@ -81,9 +90,9 @@ export function renderMarkdown(
       const [head, ...rest] = rows.filter((r, k) => !(k === 1 && /^[\s|:-]+$/.test(r)));
       out.push(
         `<table><thead><tr>${cells(head)
-          .map((c) => `<th>${inline(c)}</th>`)
+          .map((c) => `<th>${inline(c, hideTs)}</th>`)
           .join("")}</tr></thead><tbody>${rest
-          .map((r) => `<tr>${cells(r).map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`)
+          .map((r) => `<tr>${cells(r).map((c) => `<td>${inline(c, hideTs)}</td>`).join("")}</tr>`)
           .join("")}</tbody></table>`,
       );
       afterH1 = false;
@@ -95,13 +104,13 @@ export function renderMarkdown(
       while (i < lines.length && LIST.test(lines[i])) items.push(lines[i++].replace(LIST, ""));
       const meta = afterH1 && items.some((x) => /^(日期：|Date:)/.test(x));
       const tag = ordered ? "ol" : "ul";
-      if (!(skipHead && meta)) out.push(`<${tag}>${items.map((t) => `<li>${inline(t)}</li>`).join("")}</${tag}>`);
+      if (!(skipHead && meta)) out.push(`<${tag}>${items.map((t) => `<li>${inline(t, hideTs)}</li>`).join("")}</${tag}>`);
       afterH1 = false;
       continue;
     }
     const para: string[] = [];
     while (i < lines.length && lines[i].trim() && !/^(#{1,3}\s|\s*\||\s*([-*]|\d+\.)\s|\s*```)/.test(lines[i])) para.push(lines[i++]);
-    out.push(`<p>${inline(para.join(" "))}</p>`);
+    out.push(`<p>${inline(para.join(" "), hideTs)}</p>`);
     afterH1 = false;
   }
   return out.join("\n");

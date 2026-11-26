@@ -5586,7 +5586,7 @@ dependencies = [
 
 [[package]]
 name = "tingo"
-version = "0.5.14"
+version = "0.5.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -5599,7 +5599,7 @@ dependencies = [
 
 [[package]]
 name = "tingo-engine"
-version = "0.5.14"
+version = "0.5.15"
 dependencies = [
  "aes 0.8.4",
  "axum",

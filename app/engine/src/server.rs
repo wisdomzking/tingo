@@ -1201,6 +1201,37 @@ async fn post_push(
     Ok(Json(json!({"ok": true, "message": message})))
 }
 
+/// 把转写（逐段发言）推送到群机器人。复用现有 webhook，飞书/钉钉/企业微信自动识别。
+/// 转写文本用简洁的「**说话人**：内容」格式，不带时间戳（群里不需要回听定位）。
+async fn post_push_transcript(
+    State(s): State<Shared>,
+    UrlPath(id): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    let dir = s.folder(&id)?;
+    let cfg = s.config();
+    if cfg.webhook.is_empty() {
+        return Err(bad(tr(
+            "还没有配置群机器人 webhook，去设置里填一下",
+            "No group bot webhook configured yet. Add one in Settings",
+        )));
+    }
+    let tr_data = Transcript::load(&dir.join(TRANSCRIPT_JSON))
+        .map_err(|_| bad(tr("还没有转写", "No transcript yet")))?;
+    let mut body = format!("# {}\n\n", tr_data.title());
+    for turn in tr_data.turns() {
+        body.push_str(&format!("**{}**：{}\n\n", turn.speaker, turn.text));
+    }
+    let platform = tokio::task::spawn_blocking(move || {
+        push::send(&cfg.webhook, &body, &cfg.webhook_secret)
+    })
+    .await
+    .map_err(|e| bad(e.to_string()))?
+    .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    let name = platform.name();
+    let message = tr(&format!("转写已推送到{name}群"), &format!("Transcript pushed to the {name} group")).to_string();
+    Ok(Json(json!({"ok": true, "message": message})))
+}
+
 async fn obsidian_vaults() -> Json<Value> {
     let v: Vec<Value> = obsidian::vaults().into_iter().map(|(name, path)| json!({"name": name, "path": path})).collect();
     Json(json!(v))
@@ -2602,6 +2633,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/meetings/{id}/summarize", post(post_summarize))
         .route("/api/meetings/{id}/process", post(post_process))
         .route("/api/meetings/{id}/push", post(post_push))
+        .route("/api/meetings/{id}/push-transcript", post(post_push_transcript))
         .route("/api/meetings/{id}/reveal", post(reveal))
         .route("/api/meetings/{id}/obsidian", post(post_obsidian))
         .route("/api/meetings/{id}/excalidraw", post(post_excalidraw))

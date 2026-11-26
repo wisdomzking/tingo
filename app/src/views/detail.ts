@@ -1,8 +1,8 @@
 /* 会议详情：纪要 / 转写两个视图、回听播放器、说话人改名、编辑纪要、重新生成。 */
 
 import { api, type Job, type MeetingDetail, meetingPath, url } from "../api";
-import { $, $$, $maybe, closeModal, color, errorMessage, esc, fmt, ICON, initial, main, openModal, toast, tsToMs } from "../dom";
-import { fishboneToText, turnResolver } from "../fishbone";
+import { $, $$, $maybe, closeModal, color, errorMessage, esc, fmt, ICON, initial, main, openModal, toast } from "../dom";
+import { fishboneToText } from "../fishbone";
 import { renderMarkdown } from "../markdown";
 import { minutesDocument, wordDocument } from "../pdf";
 import { confirmBox, deleteAudio, deleteMeeting, editTags, fmtBytes, renameBox, setMeta } from "../manage";
@@ -110,7 +110,11 @@ export async function renderDetail(id: string, keepTab = false, at?: number): Pr
               ? `<div class="menu-wrap"><button class="btn" id="aExport">${ICON.download}${t("导出", "Export")}${ICON.chevron}</button>
                   <div class="menu" id="exportMenu" hidden>
                     ${exportMenuItems()}
-                  </div></div><button class="btn" id="aPush">${ICON.send}${t("推送到群", "Share to chat")}</button>`
+                  </div></div><div class="menu-wrap"><button class="btn" id="aPush">${ICON.send}${t("推送到群", "Share to chat")}${ICON.chevron}</button>
+                    <div class="menu" id="pushMenu" hidden>
+                      <button data-act="minutes">${ICON.send}<span><b>${t("推送纪要", "Push minutes")}</b><small>${t("整理后的会议纪要", "The organized meeting minutes")}</small></span></button>
+                      <button data-act="transcript">${ICON.file}<span><b>${t("推送转写", "Push transcript")}</b><small>${t("逐字发言记录，含说话人", "Full transcript with speakers")}</small></span></button>
+                    </div></div>`
               : ""
           }
           ${d.has_transcript && !jobHere ? `<button class="btn" id="aRegen">${ICON.redo}${d.minutes ? t("重新生成", "Regenerate") : t("生成纪要", "Write minutes")}</button>` : ""}
@@ -170,7 +174,7 @@ export async function renderDetail(id: string, keepTab = false, at?: number): Pr
     const el = $maybe(sel);
     if (el) el.onclick = fn;
   };
-  on("#aPush", pushMinutes);
+  bindPushMenu();
   bindMoreMenu(d);
   $$<HTMLAnchorElement>(".meta .tag-chip[data-tag]").forEach(
     (a) =>
@@ -239,7 +243,7 @@ function drawPane(): void {
   if (detailTab === "minutes") {
     pane.className = "card doc";
     pane.innerHTML = d.minutes
-      ? `<div class="md">${renderMarkdown(d.minutes, { skipHead: true, resolve: turnResolver(d.turns, d.duration ? tsToMs(d.duration) : Infinity) })}</div>`
+      ? `<div class="md">${renderMarkdown(d.minutes, { skipHead: true, hideTs: true })}</div>`
       : `<div class="minutes-empty">${t("还没有纪要。", "No minutes yet.")}<br><br><button class="btn primary" id="paneGen">${ICON.spark}${t("生成纪要", "Write minutes")}</button></div>`;
     const gen = $maybe("#paneGen");
     if (gen) gen.onclick = regenerate;
@@ -553,6 +557,41 @@ async function pushMinutes(): Promise<void> {
   } catch (e) {
     toast(errorMessage(e), true);
   }
+}
+
+async function pushTranscript(): Promise<void> {
+  if (!S.detail) return;
+  try {
+    toast((await api<{ message: string }>(meetingPath(S.detail.id, "/push-transcript"), { method: "POST" })).message);
+  } catch (e) {
+    toast(errorMessage(e), true);
+  }
+}
+
+/** 推送下拉菜单：纪要 / 转写 */
+function bindPushMenu(): void {
+  const btn = $maybe("#aPush");
+  const menu = $maybe("#pushMenu");
+  if (!btn || !menu) return;
+  const close = () => {
+    menu.hidden = true;
+    document.removeEventListener("mousedown", outside);
+  };
+  const outside = (e: MouseEvent) => {
+    if (!menu.contains(e.target as Node) && !btn.contains(e.target as Node)) close();
+  };
+  btn.onclick = () => {
+    menu.hidden = !menu.hidden;
+    if (!menu.hidden) document.addEventListener("mousedown", outside);
+  };
+  $$<HTMLButtonElement>("button", menu).forEach(
+    (b) =>
+      (b.onclick = () => {
+        close();
+        if (b.dataset.act === "minutes") pushMinutes();
+        else if (b.dataset.act === "transcript") pushTranscript();
+      }),
+  );
 }
 
 /** 下拉菜单：点按钮开关，点外面收起 */
