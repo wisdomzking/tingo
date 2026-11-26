@@ -53,7 +53,7 @@ const MINUTES_PROMPT: &str = "下面是一场会议的语音转写，格式为�
 1. 只依据转写内容，不编造。负责人或截止时间没有明确说出的，写\"未明确\"。
 2. 转写有同音错字，结合上下文改正明显的错误；拿不准的保留原文。
 3. 转写里的\"下周五\"\"明天\"等已由程序标好具体日期，如\"下周五（11月13日）\"，照抄括号里的日期，不要自己推算。其他相对时间（如\"十五号\"）保留原话，并查上面的日期对照表在括号里写出具体日期。
-4. **不要在正文里输出任何时间戳**——纪要里不写 mm:ss，也不要引用原话时间。时间戳只用于鱼骨图的 refs 字段（见第 7 条）。
+4. **不要在正文里输出任何时间戳或出处括号**——纪要里不写 mm:ss，也不要引用原话时间；句末不要留下空的「（）」或「()」。时间戳只用于鱼骨图的 refs 字段（见第 7 条）。
 5. 质量优先：把口语、寒暄、重复、试探性表达提炼成书面结论；同一议题的多条发言合并成 1～3 条要点；保留关键数字、金额、日期、人名、状态；删掉没有信息量的过程描述。每条要点都要能独立读懂。
 6. 某一节没有内容时写\"无\"，不要删掉这一节（「原因分析」除外，见第 7 条）。待办表没有事项时写一行\"| 无 | — | — |\"。
 7. 只有会议里明确分析了某个问题的原因时，才写「原因分析」这一节：每个问题一个 fishbone 代码块（最多两个），每块 2～6 个分支，内容是合法 JSON。refs 填支撑这个原因的原话的时间戳，必须是上面转写里出现过的 [mm:ss]（不带方括号）；找不到原话支撑就留空数组，不要编。没有分析原因的会议，整节省略，不要写\"无\"。
@@ -121,7 +121,7 @@ Rules:
 1. Use only what is in the transcript; do not make anything up. If an owner or a due date was not stated explicitly, write \"Not specified\".
 2. The transcript has recognition errors (homophones, misheard words). Fix obvious ones from context; keep the original wording when unsure.
 3. Chinese relative dates such as \"下周五\" or \"明天\" have already been annotated by the program with the actual date, e.g. \"下周五（11月13日）\"; use the date in the brackets instead of working it out yourself. For any other relative date (e.g. \"next Wednesday\", \"the 15th\"), keep the original wording and add the actual date in parentheses, looked up in the calendar above, e.g. \"next Wednesday (Nov 4)\".
-4. **Do not output any timestamps in the body** — no mm:ss in the minutes, no quoting a speaker's time. Timestamps are only for fishbone refs (see rule 7).
+4. **Do not output any timestamps or source parentheses in the body** — no mm:ss in the minutes, no quoting a speaker's time, and no empty "()" left at the end of sentences. Timestamps are only for fishbone refs (see rule 7).
 5. Quality first: turn colloquial speech, greetings, repetition and tentative phrasing into written conclusions; merge multiple remarks on one topic into 1-3 points; keep key numbers, amounts, dates, names and status; drop process descriptions with no information. Every point must be understandable on its own.
 6. If a section has nothing, write \"None\" rather than dropping the section (except \"Root Cause Analysis\", see rule 7). If there are no action items, write one row \"| None | — | — |\".
 7. Only include the \"Root Cause Analysis\" section when the meeting explicitly analyzed the causes of a problem: one fishbone code block per problem (at most two), 2-6 branches each, valid JSON. In refs, put the timestamps of the lines that support the cause; they must be [mm:ss] timestamps that appear in the transcript below (without the brackets). If no line supports it, leave refs as an empty array; do not invent one. If the meeting did not analyze causes, omit the whole section; do not write \"None\".

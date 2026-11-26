@@ -12,9 +12,11 @@ function inline(s: string, hideTs = false): string {
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/`([^`]+)`/g, "<code>$1</code>");
   if (hideTs) {
+    // 去时间戳：先删带时间戳的括号/裸时间戳，再清理模型残留的空括号壳（中英文、半/全角空格）
     out = out
       .replace(new RegExp(String.raw`\s*[（(]\s*\[${TS}\]\s*[）)]`, "g"), "")
-      .replace(new RegExp(String.raw`\s*\[${TS}\]`, "g"), "");
+      .replace(new RegExp(String.raw`\s*\[${TS}\]`, "g"), "")
+      .replace(new RegExp(String.raw`\s*[（(][\s\u3000]*[）)]`, "g"), "");
   } else {
     out = out
       .replace(new RegExp(String.raw`\s*[（(]\s*\[(${TS})\]\s*[）)]`, "g"), "[$1]")

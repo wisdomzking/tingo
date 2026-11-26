@@ -1,6 +1,6 @@
 [package]
 name = "tingo"
-version = "0.5.15"
+version = "0.5.16"
 description = "纪要：本地中文会议录音、转写与纪要"
 authors = ["stardust <642720202@qq.com>"]
 license = "MIT"
