@@ -1,0 +1,14 @@
+[package]
+name = "tingo-recorder"
+version = "0.5.14"
+edition = "2021"
+description = "Windows 录音组件：dshow 录系统声音+麦克风，ffmpeg 解码，Edge 打 PDF，回收站删除。对齐 macOS Swift recorder 的命令行契约。"
+license = "MIT"
+
+# 刻意只用标准库 + 系统已装工具（ffmpeg / msedge / PowerShell），
+# 避免引入 wasapi/openssl 等重型依赖，让 build.rs 能在几秒内编译出 exe。
+[dependencies]
+
+[profile.release]
+strip = true
+opt-level = 2

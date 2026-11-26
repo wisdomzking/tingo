@@ -5,7 +5,7 @@ import { api, type Config, type Job, type LocalProvider } from "../api";
 import { $, $$, $maybe, errorMessage, esc, ICON, main, toast } from "../dom";
 import { refreshEnv } from "../sidebar";
 import { isBusy, S } from "../state";
-import { applyLang, type LangPref, renderShell, t } from "../i18n";
+import { applyLang, type LangPref, renderShell, t, systemAudioHint } from "../i18n";
 import { checkUpdate, showUpdate } from "../update";
 import { onboarded } from "./welcome";
 import { confirmBox, deleteAudio, fmtBytes } from "../manage";
@@ -1015,7 +1015,7 @@ function panelAbout(x: Ctx): void {
       t("录系统声音", "System audio"),
       env?.system_audio
         ? t("可以录腾讯会议、飞书里对方的声音", "Can record the other side in Zoom, Teams, Tencent Meeting, Feishu…")
-        : t("需要 macOS 15+ 和 Xcode 命令行工具；不影响导入录音", "Needs macOS 15+ and Xcode Command Line Tools; importing recordings still works"),
+        : systemAudioHint(),
     ],
     [
       !!env?.model_cached,

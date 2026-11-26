@@ -35,10 +35,10 @@ pub fn default_root() -> PathBuf {
     if !cfg.storage_root.is_empty() {
         return PathBuf::from(cfg.storage_root);
     }
-    let docs = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
-        .join("Documents");
+    // Windows 真实「文档」目录通常在 USERPROFILE\Documents；HOME 在 Windows 默认不存在，
+    // 之前用 HOME 会得到相对路径 Documents\Tingo（见 platform::home_dir）。
+    let home = crate::platform::home_dir().unwrap_or_default();
+    let docs = home.join("Documents");
     crate::config::with_legacy(docs.join("Tingo"), docs.join("jiyao"))
 }
 
@@ -389,6 +389,7 @@ pub fn storage(root: &Path, busy: impl Fn(&str) -> bool) -> Value {
 }
 
 /// 路径所在磁盘的剩余空间（普通用户可用的）。路径还不存在时看最近一层存在的上级目录。
+#[cfg(unix)]
 pub fn free_bytes(path: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let existing = path.ancestors().find(|p| p.exists())?;
@@ -399,6 +400,43 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
     }
     #[allow(clippy::unnecessary_cast)] // 各平台字段类型不一样
     Some(st.f_bavail as u64 * st.f_frsize as u64)
+}
+
+/// Windows: 用 Win32 GetDiskFreeSpaceExW 查询磁盘剩余空间（普通用户可用的字节数）。
+#[cfg(windows)]
+pub fn free_bytes(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    let existing = path.ancestors().find(|p| p.exists())?;
+    // 路径转 UTF-16 并以 NUL 结尾
+    let mut wide: Vec<u16> = existing.as_os_str().encode_wide().collect();
+    wide.push(0);
+    unsafe {
+        // ULARGE_INTEGER 是两个 DWORD（8 字节），u64 与之等价且对齐正确
+        let mut free_available: u64 = 0;
+        let mut total_bytes: u64 = 0;
+        let mut total_free: u64 = 0;
+        let ok = GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_available,
+            &mut total_bytes,
+            &mut total_free,
+        );
+        if ok == 0 {
+            return None;
+        }
+        Some(free_available)
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetDiskFreeSpaceExW(
+        lp_directory_name: *const u16,
+        lp_free_bytes_available_to_caller: *mut u64,
+        lp_total_number_of_bytes: *mut u64,
+        lp_total_number_of_free_bytes: *mut u64,
+    ) -> i32;
 }
 
 #[cfg(test)]

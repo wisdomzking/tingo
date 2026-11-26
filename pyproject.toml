@@ -25,7 +25,7 @@ dependencies = [
     "numpy>=2.4.6",
     "openai>=3.42.1",
     "python-multipart>=0.0.33",
-    "pywebview>=6.2.1 ; sys_platform == 'darwin'",
+    "pywebview>=6.2.1",
     "rich>=15.0.0",
     "soundfile>=0.14.0",
     "torch>=2.15.0",

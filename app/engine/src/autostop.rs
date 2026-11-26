@@ -38,14 +38,14 @@ pub fn meeting_apps_in(ps: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// 本机正在运行的会议软件；ps 跑不起来时返回空
+/// 本机正在运行的会议软件；进程列表拿不到时返回空。
+/// 跨平台：macOS/Linux 用 ps，Windows 用 tasklist（见 platform 模块）。
 pub fn running_meeting_apps() -> BTreeSet<String> {
-    std::process::Command::new("/bin/ps")
-        .args(["-axo", "comm="])
-        .output()
-        .ok()
-        .map(|o| meeting_apps_in(&String::from_utf8_lossy(&o.stdout)))
-        .unwrap_or_default()
+    let lines: Vec<String> = crate::platform::running_process_names()
+        .into_iter()
+        .collect();
+    // meeting_apps_in 期望每行一个进程名（可含路径），这里进程名已是最后一段
+    meeting_apps_in(&lines.join("\n"))
 }
 
 #[cfg(test)]

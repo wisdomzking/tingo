@@ -61,3 +61,31 @@ export function renderShell(): void {
     el.textContent = t(zh, en ?? zh);
   });
 }
+
+/** 当前平台：mac / win / other。录音系统与权限提示按它切换 */
+export const platform = (): "mac" | "win" | "other" => {
+  const uaData = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData;
+  const p = uaData?.platform || navigator.platform;
+  if (/Mac/i.test(p)) return "mac";
+  if (/Win/i.test(p)) return "win";
+  return "other";
+};
+export const isMac = (): boolean => platform() === "mac";
+
+/** 系统声音不可用时的原因提示（按平台给可操作的指引） */
+export const systemAudioHint = (): string =>
+  platform() === "win"
+    ? t(
+        "需要「立体声混音」或 VB-CABLE 回环设备；不影响导入录音",
+        "Needs Stereo Mix or a VB-CABLE loopback device; importing recordings still works"
+      )
+    : t(
+        "需要 macOS 15+ 和 Xcode 命令行工具；不影响导入录音",
+        "Needs macOS 15+ and Xcode Command Line Tools; importing recordings still works"
+      );
+
+/** 不支持设备状态文案（新手引导） */
+export const unsupportedHint = (): string =>
+  platform() === "win"
+    ? t("这台电脑没有可用的回环设备（需立体声混音/VB-CABLE）", "No loopback device on this PC (needs Stereo Mix/VB-CABLE)")
+    : t("这台 Mac 不支持（需要 macOS 15+）", "Not supported on this Mac (needs macOS 15+)");

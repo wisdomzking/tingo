@@ -1,6 +1,6 @@
 [package]
 name = "tingo-engine"
-version = "0.5.5"
+version = "0.5.14"
 description = "纪要的核心：识别、说话人区分、会议存储、纪要生成"
 authors = ["stardust <642720202@qq.com>"]
 license = "MIT"
@@ -8,15 +8,23 @@ edition = "2021"
 rust-version = "1.85"
 
 [dependencies]
-axum = { version = "0.8", features = ["multipart"] }
+aes = "0.8"
+axum = { version = "0.8", features = ["multipart", "macros"] }
 base64 = "0.23.1"
+btleplug = "0.11"
 bzip2 = "0.6.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+ctr = "0.9"
 faer = "0.22"
+futures = "0.3"
 hmac = "0.13.0"
 libc = "0.2.191"
+p256 = { version = "0.13", features = ["ecdh"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 regex = "1.13.1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "stream", "json"] }
+# 用系统证书库而非内置 Mozilla 根：国内站点（DeepSeek 等）常用 TrustAsia 等国产 CA，
+# 内置 webpki 根不认会导致「连不上大模型：error sending request for url」。
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots", "stream", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.0"
@@ -25,4 +33,5 @@ tar = "0.4.46"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "sync"] }
 toml = "1.1.8"
 tower = { version = "0.5.3", features = ["util"] }
+uuid = { version = "1", features = ["v4"] }
 tower-http = { version = "0.7.1", features = ["cors", "fs"] }

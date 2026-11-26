@@ -459,9 +459,18 @@ pub fn chat(
         .send()
         .map_err(|e| {
             let url = &cfg.base_url;
+            // reqwest 的 Display 只有 "error sending request for url (…)"，TLS/代理/超时等
+            // 真正原因全在 source() 链里。必须展开，否则用户和日志都看不到根因。
+            let mut detail = e.to_string();
+            let mut src = std::error::Error::source(&e);
+            while let Some(c) = src {
+                detail.push_str(" ← ");
+                detail.push_str(&c.to_string());
+                src = c.source();
+            }
             tr(
-                &format!("连不上大模型（{url}）：{e}"),
-                &format!("Couldn't reach the language model ({url}): {e}"),
+                &format!("连不上大模型（{url}）：{detail}"),
+                &format!("Couldn't reach the language model ({url}): {detail}"),
             )
             .to_string()
         })?;
@@ -590,9 +599,18 @@ fn chat_anthropic(
         .send()
         .map_err(|e| {
             let url = &cfg.base_url;
+            // reqwest 的 Display 只有 "error sending request for url (…)"，TLS/代理/超时等
+            // 真正原因全在 source() 链里。必须展开，否则用户和日志都看不到根因。
+            let mut detail = e.to_string();
+            let mut src = std::error::Error::source(&e);
+            while let Some(c) = src {
+                detail.push_str(" ← ");
+                detail.push_str(&c.to_string());
+                src = c.source();
+            }
             tr(
-                &format!("连不上大模型（{url}）：{e}"),
-                &format!("Couldn't reach the language model ({url}): {e}"),
+                &format!("连不上大模型（{url}）：{detail}"),
+                &format!("Couldn't reach the language model ({url}): {detail}"),
             )
             .to_string()
         })?;

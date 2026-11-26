@@ -7,3 +7,9 @@ build/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+*.log
+_tmp_*
+target/
+app/src-tauri/target/
+app/engine/target/
+app/recorder/target/

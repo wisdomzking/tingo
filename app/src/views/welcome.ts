@@ -3,7 +3,7 @@
 
 import { api, type Job } from "../api";
 import { $, $maybe, errorMessage, esc, ICON, main, toast } from "../dom";
-import { t } from "../i18n";
+import { t, platform, unsupportedHint } from "../i18n";
 import { poll } from "../poll";
 import { refreshEnv, refreshMeetings } from "../sidebar";
 import { isBusy, needsModels, S } from "../state";
@@ -142,15 +142,20 @@ const BODY: Record<Step, () => void> = {
         ok: t("正常", "Working"),
         silent: t("录到了，但几乎没声音", "Recorded, but almost silent"),
         denied: t("没有权限", "No permission"),
-        unsupported: t("这台 Mac 不支持（需要 macOS 15+）", "Not supported on this Mac (needs macOS 15+)"),
+        unsupported: unsupportedHint(),
         error: t("出错了", "Error"),
       })[st] ?? st;
     box.innerHTML = `
       <h2>${t("录音权限", "Recording permissions")}</h2>
-      <p class="hint">${t(
-        "Tingo 要两个权限：「麦克风」录你说的话，「屏幕与系统录音」录会议软件里对方的声音（只录声音，不录画面）。点下面的按钮试录 3 秒，系统会弹窗请求权限。试录时可以随便说句话、放点声音。",
-        "Tingo needs two permissions: Microphone for your voice, and Screen & System Audio Recording for the other side of the call (audio only, never the screen). Click below to test for 3 seconds — macOS will ask for permission. Say something and play some audio while it tests.",
-      )}</p>
+      <p class="hint">${platform() === "win"
+        ? t(
+            "Tingo 要两路声音：「麦克风」录你说的话，「立体声混音 / VB-CABLE」录会议软件里对方的声音。请先在系统声音设置里启用「立体声混音」或装好 VB-CABLE，再点下面的按钮试录 3 秒（随便说句话、放点声音）。",
+            "Tingo needs two audio sources: Microphone for your voice, and Stereo Mix / VB-CABLE for the other side of the call. Enable Stereo Mix or install VB-CABLE first, then test for 3 seconds — say something and play some audio."
+          )
+        : t(
+            "Tingo 要两个权限：「麦克风」录你说的话，「屏幕与系统录音」录会议软件里对方的声音（只录声音，不录画面）。点下面的按钮试录 3 秒，系统会弹窗请求权限。试录时可以随便说句话、放点声音。",
+            "Tingo needs two permissions: Microphone for your voice, and Screen & System Audio Recording for the other side of the call (audio only, never the screen). Click below to test for 3 seconds — macOS will ask for permission. Say something and play some audio while it tests."
+          )}</p>
       <button class="btn primary" id="wlTest">${ICON.mic}${t("试录 3 秒", "Test for 3 seconds")}</button>
       ${
         permResult

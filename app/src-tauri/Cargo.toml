@@ -1,6 +1,6 @@
 [package]
 name = "tingo"
-version = "0.5.5"
+version = "0.5.14"
 description = "纪要：本地中文会议录音、转写与纪要"
 authors = ["stardust <642720202@qq.com>"]
 license = "MIT"
@@ -18,13 +18,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tingo-engine = { version = "0.5.5", path = "../engine" }
+tingo-engine = { version = "0.5.14", path = "../engine" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread"] }
 tauri-plugin-updater = "2.14.1"
 
 [profile.release]
 strip = true
-lto = true
+# LTO 全程序优化在 Windows 上链接 sherpa-onnx + tauri 静态库会卡死数小时（内存峰值 >1GB 后停滞）。
+# 本地桌面工具不需要 LTO，关掉后链接从 40+ 分钟降到几分钟，功能与体积无实质差别。
+lto = false
 codegen-units = 1
 
 [dev-dependencies]

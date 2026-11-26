@@ -3,7 +3,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::asr::SR;
@@ -29,7 +29,7 @@ impl Recorder {
             .into());
         }
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::platform::command(bin);
         cmd.arg(dir);
         if !mic {
             cmd.arg("--no-mic");
@@ -38,7 +38,7 @@ impl Recorder {
             cmd.arg("--no-system");
         }
         let mut child = cmd
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped()) // Windows 版 recorder 从这里读停止命令 q；macOS 版不读也无妨
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -93,11 +93,21 @@ impl Recorder {
         }
     }
 
-    /// 停止录音：发 SIGINT 让它写完文件头，15 秒内没退出就强杀。原始音轨留着。
+    /// 停止录音：让它写完文件头，15 秒内没退出就强杀。原始音轨留着。
+    /// macOS 发 SIGINT（Swift recorder 监听）；Windows 往 stdin 写 q（dshow 版 recorder 监听）。
     pub fn stop(&mut self) {
         if self.child.try_wait().ok().flatten().is_some() {
             return;
         }
+        #[cfg(target_os = "windows")]
+        {
+            use std::io::Write;
+            if let Some(stdin) = self.child.stdin.as_mut() {
+                let _ = stdin.write_all(b"q\n");
+                let _ = stdin.flush();
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
         unsafe {
             libc::kill(self.child.id() as i32, libc::SIGINT);
         }
@@ -124,7 +134,7 @@ impl Drop for Recorder {
 pub fn html_to_pdf(bin: &Path, html: &str, out: &Path) -> Result<(), String> {
     let tmp = std::env::temp_dir().join(format!("tingo-pdf-{}-{}.html", std::process::id(), rand_suffix()));
     std::fs::write(&tmp, html).map_err(|e| e.to_string())?;
-    let res = Command::new(bin).arg("pdf").arg(&tmp).arg(out).output();
+    let res = crate::platform::command(bin).arg("pdf").arg(&tmp).arg(out).output();
     let _ = std::fs::remove_file(&tmp);
     let res = res.map_err(|e| {
         tr(&format!("启动排版失败：{e}"), &format!("Couldn't start the PDF renderer: {e}")).to_string()
@@ -145,7 +155,7 @@ pub fn html_to_pdf(bin: &Path, html: &str, out: &Path) -> Result<(), String> {
 pub fn trash(bin: &Path, path: &Path) -> Result<(), String> {
     let failed = |e: &str| tr(&format!("没能移到废纸篓：{e}"), &format!("Couldn't move to the Trash: {e}")).to_string();
     if cfg!(target_os = "macos") || bin.is_file() {
-        let out = Command::new(bin).arg("trash").arg(path).stdin(Stdio::null()).output().map_err(|e| failed(&e.to_string()))?;
+        let out = crate::platform::command(bin).arg("trash").arg(path).stdin(Stdio::null()).output().map_err(|e| failed(&e.to_string()))?;
         let text = String::from_utf8_lossy(&out.stdout);
         if out.status.success() && text.lines().any(|l| l.trim() == "OK") {
             return Ok(());
@@ -158,7 +168,7 @@ pub fn trash(bin: &Path, path: &Path) -> Result<(), String> {
     let Some(gio) = find_in_path("gio") else {
         return Err(tr("这个系统上没法移到废纸篓", "Moving to the Trash isn't supported on this system").into());
     };
-    let out = Command::new(gio).arg("trash").arg(path).stdin(Stdio::null()).output().map_err(|e| failed(&e.to_string()))?;
+    let out = crate::platform::command(gio).arg("trash").arg(path).stdin(Stdio::null()).output().map_err(|e| failed(&e.to_string()))?;
     if out.status.success() {
         Ok(())
     } else {
@@ -172,15 +182,28 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
 
 pub const TEXTUTIL: &str = "/usr/bin/textutil";
 
-/// HTML → Word：macOS 自带的 textutil。没有 textutil（非 macOS）时报错。
-pub fn html_to_docx(html: &str, out: &Path) -> Result<(), String> {
+/// HTML → Word：macOS 用自带的 textutil；其它平台交给录音组件的 docx 子命令（Windows 用 Word COM）。
+pub fn html_to_docx(bin: &Path, html: &str, out: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        let tmp = std::env::temp_dir().join(format!("tingo-docx-{}-{}.html", std::process::id(), rand_suffix()));
+        std::fs::write(&tmp, html).map_err(|e| e.to_string())?;
+        let res = crate::platform::command(bin).arg("docx").arg(&tmp).arg(out).output();
+        let _ = std::fs::remove_file(&tmp);
+        let res = res.map_err(|e| tr(&format!("启动 Word 导出失败：{e}"), &format!("Couldn't start Word export: {e}")).to_string())?;
+        if res.status.success() && out.is_file() {
+            return Ok(());
+        }
+        let msg = String::from_utf8_lossy(&res.stdout);
+        return Err(msg.lines().find_map(|l| l.strip_prefix("ERROR: "))
+            .unwrap_or(tr("导出 Word 失败", "Word export failed")).to_string());
+    }
     if !Path::new(TEXTUTIL).is_file() {
-        return Err(tr("导出 Word 只支持 macOS", "Word export is only available on macOS").into());
+        return Err(tr("导出 Word 失败：缺少 textutil", "Word export failed: textutil not found").into());
     }
     let tmp = std::env::temp_dir().join(format!("tingo-docx-{}-{}.html", std::process::id(), rand_suffix()));
     std::fs::write(&tmp, html).map_err(|e| e.to_string())?;
     // 不指定输入编码时，HTML 里没写 charset 的话中文会变成乱码
-    let res = Command::new(TEXTUTIL)
+    let res = crate::platform::command(TEXTUTIL)
         .args(["-inputencoding", "UTF-8", "-convert", "docx", "-output"])
         .arg(out)
         .arg(&tmp)
@@ -240,7 +263,7 @@ pub fn decode(bin: &Path, input: &Path) -> Result<Vec<f32>, String> {
         std::process::id(),
         rand_suffix()
     ));
-    let out = Command::new(bin)
+    let out = crate::platform::command(bin)
         .arg("decode")
         .arg(input)
         .arg(&tmp)
@@ -301,12 +324,22 @@ pub fn mixdown(dir: &Path, dest: &Path) -> Result<(), String> {
     };
     let wav = dir.join("mixed.wav");
     write_wav16(&wav, &mixed).map_err(|e| e.to_string())?;
-    let out = Command::new("/usr/bin/afconvert")
-        .args(["-f", "m4af", "-d", "aac", "-b", "48000"]) // 16 kHz 单声道 AAC 最高 48 kbps
-        .arg(&wav)
-        .arg(dest)
-        .output()
-        .map_err(|e| tr(&format!("压缩录音失败：{e}"), &format!("Compressing the recording failed: {e}")).to_string())?;
+    // macOS 用系统 afconvert；Windows/Linux 用 ffmpeg 压 AAC（48 kbps 单声道）
+    let out = if cfg!(target_os = "macos") {
+        crate::platform::command("/usr/bin/afconvert")
+            .args(["-f", "m4af", "-d", "aac", "-b", "48000"])
+            .arg(&wav)
+            .arg(dest)
+            .output()
+    } else {
+        crate::platform::command(crate::platform::ffmpeg())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&wav)
+            .args(["-c:a", "aac", "-b:a", "48k", "-ac", "1"])
+            .arg(dest)
+            .output()
+    }
+    .map_err(|e| tr(&format!("压缩录音失败：{e}"), &format!("Compressing the recording failed: {e}")).to_string())?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(tr(

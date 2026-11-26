@@ -1,7 +1,7 @@
 /* 首页：录音表单 → 录音中（计时、电平、实时文字）→ 结束后立刻回到录音表单，转写和生成纪要在后台进行，
    进度显示在玻璃面板下方和侧边栏。第一次使用时玻璃面板里下载识别模型。另含拖拽导入。 */
 
-import { t } from "../i18n";
+import { t, systemAudioHint } from "../i18n";
 import { api, type Job } from "../api";
 import { $, $maybe, errorMessage, esc, ICON, main, toast } from "../dom";
 import { poll } from "../poll";
@@ -38,6 +38,7 @@ export function renderHome(): void {
       <div class="home-tasks" id="homeTasks"></div>
       <div class="quick">
         <div class="quick-item" id="qImport"><span class="ico">${ICON.upload}</span><span><b>${t("导入录音", "Import recording")}</b><small>${t("拖进窗口，或点这里选文件", "Drop it in, or click to choose a file")}</small></span>${ICON.chevron}</div>
+        <a class="quick-item" href="#/bean"><span class="ico">${ICON.mic}</span><span><b>${t("录音豆", "Recorder bean")}</b><small>${t("从录音豆导入离线录音", "Import offline recordings from your bean")}</small></span>${ICON.chevron}</a>
         <a class="quick-item" href="#/meetings"><span class="ico">${ICON.file}</span><span><b>${t("会议记录", "Meetings")}</b><small id="qCount">${t("查看全部会议", "See all meetings")}</small></span>${ICON.chevron}</a>
         <a class="quick-item" href="#/settings/llm"><span class="ico">${ICON.bot}</span><span><b>${t("大模型", "LLM")}</b><small id="qModel">${t("设置纪要用的模型", "Choose the model that writes minutes")}</small></span>${ICON.chevron}</a>
         <a class="quick-item" href="#/settings/push"><span class="ico">${ICON.send}</span><span><b>${t("推送到群", "Share to chat")}</b><small>${t("飞书 · 钉钉 · 企业微信", "Feishu · DingTalk · WeCom")}</small></span>${ICON.chevron}</a>
@@ -92,7 +93,7 @@ function idleForm(): string {
     <input class="title-input" id="fTitle" placeholder="${t("会议名称，比如：周会、项目评审", "Meeting name, e.g. Weekly sync, Design review")}" value="${esc(S.form.title)}" maxlength="60">
     <input class="hot-input" id="fHot" placeholder="${t("热词（可选）：人名、项目代号、专有名词，用逗号隔开", "Hotwords (optional): names, project codes, jargon — comma separated")}" value="${esc(S.form.hotwords)}">
     <div class="glass-foot">
-      <button class="toggle ${S.form.system && sys ? "on" : ""}" id="tSys" aria-pressed="${Boolean(S.form.system && sys)}" ${sys ? "" : `disabled title='${t("需要 macOS 15+", "Requires macOS 15+")}'`}>${ICON.monitor}${t("系统声音", "System audio")}</button>
+      <button class="toggle ${S.form.system && sys ? "on" : ""}" id="tSys" aria-pressed="${Boolean(S.form.system && sys)}" ${sys ? "" : `disabled title='${systemAudioHint()}'`}>${ICON.monitor}${t("系统声音", "System audio")}</button>
       <button class="toggle ${S.form.mic ? "on" : ""}" id="tMic" aria-pressed="${Boolean(S.form.mic)}">${ICON.mic}${t("麦克风", "Microphone")}</button>
       <span class="spacer"></span>
       <span class="rec-label">${t("开始录音", "Record")}</span>

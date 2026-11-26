@@ -1,5 +1,6 @@
 import { $$, main } from "./dom";
 import { S } from "./state";
+import { renderBean } from "./views/bean";
 import { renderDetail, stopAudio } from "./views/detail";
 import { renderHome } from "./views/home";
 import { leaveRecording } from "./views/recording";
@@ -21,6 +22,9 @@ export function route(): void {
   } else if (h === "/meetings") {
     nav = "meetings";
     renderMeetings();
+  } else if (h === "/bean") {
+    nav = "bean";
+    renderBean();
   } else if (h.startsWith("/welcome")) {
     renderWelcome(h.split("/")[2]);
   } else if (h === "/settings" || h.startsWith("/settings/")) {

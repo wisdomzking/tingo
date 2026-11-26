@@ -38,6 +38,38 @@ impl Default for ObsidianConfig {
     }
 }
 
+/// 录音豆绑定关系：绑定后只允许连接这一台，解绑后才能换设备。
+/// 存在配置文件里，重启软件后仍然保留。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BeanConfig {
+    /// 连接时使用的目标：优先设备名（稳定），MAC 仅作辅助；空表示未绑定
+    pub target: String,
+    /// 绑定时扫描到的设备显示名
+    pub name: String,
+    /// 厂商广播里的真实 MAC（可能为空，Windows 上未必能读到）
+    pub mac: String,
+    /// 设备信息里的序列号，用于连接后复核，避免同名设备串台
+    pub serial: String,
+    /// 绑定时间（本地可读时间）
+    pub bound_at: String,
+}
+
+impl BeanConfig {
+    pub fn is_bound(&self) -> bool {
+        !self.target.trim().is_empty()
+    }
+
+    pub fn display_name(&self) -> &str {
+        if !self.name.is_empty() {
+            &self.name
+        } else if !self.target.is_empty() {
+            &self.target
+        } else {
+            "录音豆"
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub storage_root: String,
@@ -56,6 +88,8 @@ pub struct Config {
     pub auto_stop_silence_min: u32,
     /// [record] auto_stop_app_quit：开始录音时在运行的会议软件全部退出后自动结束录音
     pub auto_stop_app_quit: bool,
+    /// [bean] 录音豆绑定关系
+    pub bean: BeanConfig,
 }
 
 impl Default for Config {
@@ -72,6 +106,7 @@ impl Default for Config {
             asr_language: "zh".into(),
             auto_stop_silence_min: DEFAULT_SILENCE_MIN,
             auto_stop_app_quit: true,
+            bean: BeanConfig::default(),
         }
     }
 }
@@ -129,6 +164,15 @@ struct RawStorage {
 }
 
 #[derive(Deserialize, Default)]
+struct RawBean {
+    target: Option<String>,
+    name: Option<String>,
+    mac: Option<String>,
+    serial: Option<String>,
+    bound_at: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
 struct Raw {
     #[serde(default)]
     storage: RawStorage,
@@ -147,6 +191,8 @@ struct Raw {
     asr: RawLang,
     #[serde(default)]
     record: RawRecord,
+    #[serde(default)]
+    bean: RawBean,
 }
 
 /// 读环境变量；改名前的 JIYAO_ 前缀照样认
@@ -177,9 +223,7 @@ pub fn default_path() -> PathBuf {
     if let Some(p) = env_var("CONFIG") {
         return PathBuf::from(p);
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
+    let home = crate::platform::home_dir().unwrap_or_default();
     with_legacy(home.join(".config/tingo/config.toml"), home.join(".config/jiyao/config.toml"))
 }
 
@@ -220,6 +264,13 @@ pub fn load(path: &Path) -> Config {
             .map(|m| m as u32)
             .unwrap_or(DEFAULT_SILENCE_MIN),
         auto_stop_app_quit: raw.record.auto_stop_app_quit.unwrap_or(true),
+        bean: BeanConfig {
+            target: raw.bean.target.unwrap_or_default().trim().into(),
+            name: raw.bean.name.unwrap_or_default().trim().into(),
+            mac: raw.bean.mac.unwrap_or_default().trim().into(),
+            serial: raw.bean.serial.unwrap_or_default().trim().into(),
+            bound_at: raw.bean.bound_at.unwrap_or_default().trim().into(),
+        },
     };
     let env = |k: &str| match k.strip_prefix("TINGO_") {
         Some(name) => env_var(name),
@@ -257,7 +308,7 @@ fn quote(s: &str) -> String {
 pub fn save(path: &Path, cfg: &Config) -> std::io::Result<()> {
     let words: Vec<String> = cfg.hotwords.iter().map(|w| quote(w)).collect();
     let text = format!(
-        "# tingo 配置，由图形界面写入；也可以直接编辑。\n\n# 专有名词、人名、项目代号，提高识别准确率\nhotwords = [{}]\n\n[llm]\nbase_url = {}\napi_key = {}\nmodel = {}\napi = {}\n\n[push]\nwebhook = {}\nsecret = {}\n\n[obsidian]\nvault = {}\nfolder = {}\nauto = {}\ntranscript = {}\n\n[ui]\nlanguage = {}\n\n[minutes]\nlanguage = {}\n\n[asr]\nlanguage = {}\n\n[record]\nauto_stop_silence_min = {}\nauto_stop_app_quit = {}\n\n[storage]\nroot = {}\n",
+        "# tingo 配置，由图形界面写入；也可以直接编辑。\n\n# 专有名词、人名、项目代号，提高识别准确率\nhotwords = [{}]\n\n[llm]\nbase_url = {}\napi_key = {}\nmodel = {}\napi = {}\n\n[push]\nwebhook = {}\nsecret = {}\n\n[obsidian]\nvault = {}\nfolder = {}\nauto = {}\ntranscript = {}\n\n[ui]\nlanguage = {}\n\n[minutes]\nlanguage = {}\n\n[asr]\nlanguage = {}\n\n[record]\nauto_stop_silence_min = {}\nauto_stop_app_quit = {}\n\n[storage]\nroot = {}\n\n# 录音豆绑定：只连接这一台；解绑后清空即可重新绑定\n[bean]\ntarget = {}\nname = {}\nmac = {}\nserial = {}\nbound_at = {}\n",
         words.join(", "),
         quote(&cfg.llm.base_url),
         quote(&cfg.llm.api_key),
@@ -275,6 +326,11 @@ pub fn save(path: &Path, cfg: &Config) -> std::io::Result<()> {
         cfg.auto_stop_silence_min,
         cfg.auto_stop_app_quit,
         quote(&cfg.storage_root),
+        quote(&cfg.bean.target),
+        quote(&cfg.bean.name),
+        quote(&cfg.bean.mac),
+        quote(&cfg.bean.serial),
+        quote(&cfg.bean.bound_at),
     );
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -387,5 +443,30 @@ mod tests {
         std::fs::write(&p, "[record]\nauto_stop_silence_min = 999\n").unwrap();
         let c = load(&p);
         assert_eq!((c.auto_stop_silence_min, c.auto_stop_app_quit), (10, true));
+    }
+
+    #[test]
+    fn bean_binding_roundtrip() {
+        let p = tmp("bean");
+        assert!(!load(&p).bean.is_bound());
+        let cfg = Config {
+            bean: BeanConfig {
+                target: "soundcore Work".into(),
+                name: "soundcore Work".into(),
+                mac: "AA:BB:CC:DD:EE:FF".into(),
+                serial: "D3200000123".into(),
+                bound_at: "2026-11-25 14:10".into(),
+            },
+            ..Default::default()
+        };
+        save(&p, &cfg).unwrap();
+        let loaded = load(&p);
+        assert_eq!(loaded.bean, cfg.bean);
+        assert!(loaded.bean.is_bound());
+        assert_eq!(loaded.bean.display_name(), "soundcore Work");
+        // 解绑就是清空这一节；再次读取应恢复未绑定
+        let cleared = Config { bean: BeanConfig::default(), ..Default::default() };
+        save(&p, &cleared).unwrap();
+        assert!(!load(&p).bean.is_bound());
     }
 }

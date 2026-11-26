@@ -1,5 +1,5 @@
 //! Bridge to the bundled Swift helper. System assets are never deleted by Tingo.
-use std::{path::{Path, PathBuf}, process::{Command, Stdio}, io::Read, time::{Duration, Instant}};
+use std::{path::{Path, PathBuf}, process::Stdio, io::Read, time::{Duration, Instant}};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -8,7 +8,7 @@ pub struct Status { pub available: bool, pub ready: bool }
 pub struct Span { pub start: f64, pub end: f64, pub text: String }
 
 pub fn run(bin: &Path, action: &str, language: &str, audio: Option<&Path>) -> Result<String, String> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::platform::command(bin);
     cmd.args([action, language]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     if let Some(p) = audio { cmd.arg(p); }
     let mut child = cmd.spawn().map_err(|e| format!("Apple speech: {e}"))?;

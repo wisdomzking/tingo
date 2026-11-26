@@ -106,6 +106,9 @@ pub struct AppState {
     recording: Mutex<Option<Live>>,
     /// 检查更新的结果，缓存 6 小时
     update: Mutex<Option<(Instant, update::Release)>>,
+    /// 录音豆 BLE 全局串行锁：WinRT 同一时刻只允许一个 GATT 会话。
+    /// 扫描/连接/读信息/拉流若并发，会让 peripheral.connect() 挂起不返回。
+    bean_lock: tokio::sync::Mutex<()>,
 }
 
 type Shared = Arc<AppState>;
@@ -157,6 +160,7 @@ impl AppState {
             jobs: Mutex::new(Vec::new()),
             recording: Mutex::new(None),
             update: Mutex::new(None),
+            bean_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -576,7 +580,18 @@ fn system_audio_supported(bin: &Path) -> bool {
     if !bin.is_file() {
         return false;
     }
-    let out = std::process::Command::new("/usr/bin/sw_vers")
+    if crate::platform::IS_WINDOWS {
+        // Windows 版 recorder 用 ffmpeg dshow 回环采集；ffmpeg 可用即支持
+        return crate::platform::command(crate::platform::ffmpeg())
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    }
+    // macOS 需要 15+（ScreenCaptureKit）
+    let out = crate::platform::command("/usr/bin/sw_vers")
         .arg("-productVersion")
         .output();
     out.ok()
@@ -703,8 +718,8 @@ async fn put_config(State(s): State<Shared>, Json(r): Json<ConfigReq>) -> ApiRes
     }
     if let Some(o) = r.obsidian {
         c.obsidian = config::ObsidianConfig {
-            vault: match (o.vault.trim().strip_prefix("~/"), std::env::var("HOME")) {
-                (Some(rest), Ok(home)) => format!("{home}/{rest}"), // 设置页里可以填 ~/…
+            vault: match (o.vault.trim().strip_prefix("~/"), crate::platform::home_dir()) {
+                (Some(rest), Some(home)) => home.join(rest).to_string_lossy().into_owned(), // 设置页里可以填 ~/…
                 _ => o.vault.trim().into(),
             },
             folder: o.folder.trim().trim_matches('/').into(),
@@ -979,7 +994,7 @@ struct StorageDirectoryReq {
 
 async fn choose_storage(State(s): State<Shared>) -> ApiResult<Json<Value>> {
     let value = tokio::task::spawn_blocking(move || {
-        let output = std::process::Command::new(&s.opt.recorder_bin)
+        let output = crate::platform::command(&s.opt.recorder_bin)
             .arg("choose-directory").arg(s.root()).output().map_err(|e| bad(e.to_string()))?;
         if !output.status.success() { return Err(bad(String::from_utf8_lossy(&output.stderr).to_string())); }
         serde_json::from_slice::<Value>(&output.stdout).map_err(|e| bad(e.to_string()))
@@ -1213,7 +1228,7 @@ async fn post_obsidian(
         .map_err(bad)?;
     let uri = obsidian::uri(&out.note);
     if body.is_some_and(|b| b.open) {
-        let _ = std::process::Command::new("/usr/bin/open").arg(&uri).spawn();
+        let _ = crate::platform::open_path(Path::new(&uri));
     }
     Ok(Json(json!({"ok": true, "path": out.note, "uri": uri, "drawings": out.drawings.len()})))
 }
@@ -1240,7 +1255,7 @@ async fn post_excalidraw(State(s): State<Shared>, UrlPath(id): UrlPath<String>) 
         std::fs::write(&p, text).map_err(|e| bad(e.to_string()))?;
         paths.push(p);
     }
-    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&paths[0]).spawn();
+    let _ = crate::platform::reveal_path(&paths[0]);
     Ok(Json(json!({"ok": true, "paths": paths})))
 }
 
@@ -1280,7 +1295,7 @@ async fn post_pdf(
         .await
         .map_err(|e| bad(e.to_string()))?
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&out).spawn();
+    let _ = crate::platform::reveal_path(&out);
     Ok(Json(json!({"ok": true, "path": out})))
 }
 
@@ -1302,7 +1317,7 @@ async fn post_srt(State(s): State<Shared>, UrlPath(id): UrlPath<String>) -> ApiR
     let t = Transcript::load(&dir.join(TRANSCRIPT_JSON)).map_err(|_| bad(tr("还没有转写", "No transcript yet")))?;
     let out = dir.join(format!("{}.srt", export_stem(&dir, &id)));
     std::fs::write(&out, t.to_srt(i18n::ui())).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&out).spawn();
+    let _ = crate::platform::reveal_path(&out);
     Ok(Json(json!({"ok": true, "path": out})))
 }
 
@@ -1320,11 +1335,12 @@ async fn post_docx(
     } else { export_stem(&dir, &id) };
     let out = dir.join(format!("{}{}.docx", stem, version.suffix()));
     let target = out.clone();
-    tokio::task::spawn_blocking(move || record::html_to_docx(&r.html, &target))
+    let bin = s.opt.recorder_bin.clone();
+    tokio::task::spawn_blocking(move || record::html_to_docx(&bin, &r.html, &target))
         .await
         .map_err(|e| bad(e.to_string()))?
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&out).spawn();
+    let _ = crate::platform::reveal_path(&out);
     Ok(Json(json!({"ok": true, "path": out})))
 }
 
@@ -1415,7 +1431,7 @@ async fn post_demo(State(s): State<Shared>) -> ApiResult<Json<Value>> {
 
 async fn reveal(State(s): State<Shared>, UrlPath(id): UrlPath<String>) -> ApiResult<Json<Value>> {
     let dir = s.folder(&id)?;
-    let _ = std::process::Command::new("/usr/bin/open").arg(dir).spawn();
+    let _ = crate::platform::open_path(&dir);
     Ok(Json(json!({"ok": true})))
 }
 
@@ -2065,7 +2081,7 @@ async fn download_update(State(s): State<Shared>) -> ApiResult<Json<Job>> {
     let job = Job::new("update", "", "downloading");
     s.start_job(job.clone())?;
     spawn_job(&s, &job.id, move |st, id| {
-        let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("HOME")?;
+        let home = crate::platform::home_dir().ok_or("HOME")?;
         let dest = home.join("Downloads").join(&name);
         let _ = std::fs::remove_file(&dest);
         let _ = std::fs::remove_file(dest.with_extension("part"));
@@ -2084,7 +2100,7 @@ async fn download_update(State(s): State<Shared>) -> ApiResult<Json<Job>> {
                 .into());
             }
         }
-        let _ = std::process::Command::new("/usr/bin/open").arg(&dest).spawn();
+        let _ = crate::platform::open_path(&dest);
         st.update(id, |j| {
             j.notice = i18n::tr(
                 "新版已下载并校验，把 Tingo 拖进「应用程序」替换即可",
@@ -2095,6 +2111,455 @@ async fn download_update(State(s): State<Shared>) -> ApiResult<Json<Job>> {
         Ok(())
     });
     Ok(Json(job))
+}
+
+// ---------- 录音豆（soundcore D3200，自有硬件互操作） ----------
+
+#[derive(Deserialize, Default)]
+struct BeanReq {
+    /// 设备 MAC / 名称；留空连第一台发现的录音豆
+    target: Option<String>,
+    /// 绑定时从扫描结果带过来的展示信息
+    name: Option<String>,
+    mac: Option<String>,
+    #[serde(alias = "fileId")]
+    file_id: Option<u32>,
+    #[serde(alias = "deleteAfterImport")]
+    delete_after_import: Option<bool>,
+    /// 绑定时前端已读到的序列号；连上后核对，防止绑到旁边另一台同型号设备。
+    #[serde(alias = "expectSerial")]
+    expect_serial: Option<String>,
+    /// probe 已经读到的序列号。有它就走"免重连绑定"：序列号来源是刚完成的严格连接，
+    /// 绑定无需再连一次设备（WinRT 二次连接最容易挂起，正是"点了没反应"的根因）。
+    #[serde(alias = "serial")]
+    serial: Option<String>,
+    title: Option<String>,
+}
+
+/// 录音豆绑定关系的 JSON 形态，给界面直接用 camelCase。
+fn bean_binding_json(b: &config::BeanConfig) -> Value {
+    json!({
+        "bound": b.is_bound(),
+        "target": b.target,
+        "name": b.name,
+        "mac": b.mac,
+        "serial": b.serial,
+        "boundAt": b.bound_at,
+        "displayName": b.display_name(),
+    })
+}
+
+/// 比较设备标识：忽略大小写、冒号、连字符和空格。
+/// 用来防止已绑定时前端还拿旧扫描结果连另一台设备。
+fn norm_bean_id(s: &str) -> String {
+    s.trim().to_lowercase().replace([':', '-', ' '], "")
+}
+
+fn bean_target_matches(b: &config::BeanConfig, target: &str) -> bool {
+    let needle = norm_bean_id(target);
+    if needle.is_empty() {
+        return true;
+    }
+    [b.target.as_str(), b.name.as_str(), b.mac.as_str()]
+        .iter()
+        .any(|v| {
+            let v = norm_bean_id(v);
+            !v.is_empty() && (v == needle || v.contains(&needle) || needle.contains(&v))
+        })
+}
+
+/// 已绑定时强制使用绑定目标；未绑定时才用请求里选择的设备。
+fn resolve_bean_target(s: &Shared, req: &BeanReq) -> Result<String, ApiError> {
+    let b = s.config().bean;
+    if b.is_bound() {
+        if let Some(t) = req.target.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            if !bean_target_matches(&b, t) {
+                return Err(bad(tr(
+                    "当前已绑定另一台录音豆，请先解绑",
+                    "Another recorder is bound. Unbind it first",
+                )));
+            }
+        }
+        Ok(b.target.clone())
+    } else {
+        Ok(req.target.as_deref().unwrap_or("").trim().into())
+    }
+}
+
+/// 连接后核对序列号，避免两台同型号设备串台。
+fn assert_bean_serial(info: &crate::bean::models::DeviceInfo, b: &config::BeanConfig) -> Result<(), ApiError> {
+    if b.serial.trim().is_empty() || info.serial_number.trim().is_empty() {
+        return Ok(());
+    }
+    if norm_bean_id(&info.serial_number) != norm_bean_id(&b.serial) {
+        return Err(bad(tr(
+            &format!("连到的不是已绑定的录音豆（序列号 {}）", info.serial_number),
+            &format!("Connected recorder does not match the bound one (serial {})", info.serial_number),
+        )));
+    }
+    Ok(())
+}
+
+async fn verify_bound_serial(
+    client: &mut crate::bean::client::BeanClient,
+    b: &config::BeanConfig,
+) -> Result<(), ApiError> {
+    if b.serial.trim().is_empty() {
+        return Ok(());
+    }
+    let info = client.device_info().await.map_err(bad)?;
+    assert_bean_serial(&info, b)
+}
+
+/// 获取录音豆全局锁：最多等 5 秒。上游 BLE 请求若卡住，后续请求不能无限排队，
+/// 否则前端超时返回后重试会一直卡在锁上（表现为反复"扫描耗时过长"）。
+async fn bean_lock_guard(s: &Shared) -> ApiResult<tokio::sync::MutexGuard<'_, ()>> {
+    tokio::time::timeout(Duration::from_secs(5), s.bean_lock.lock())
+        .await
+        .map_err(|_| {
+            bad(tr(
+                "录音豆正忙，请稍后再试（上一个操作还没结束）",
+                "Recorder is busy — the previous operation is still running, retry shortly",
+            ))
+        })
+}
+
+async fn bean_status(State(s): State<Shared>) -> Json<Value> {
+    let binding = s.config().bean;
+    Json(json!({
+        "available": true,
+        "product": "soundcore Work / D3200",
+        "transport": "BLE GATT (btleplug/WinRT)",
+        "features": ["scan", "bind", "unbind", "deviceInfo", "fileList", "offlineImport", "selfTest"],
+        "binding": bean_binding_json(&binding),
+        "note": "仅用于连接自有录音豆；导出音频后走 tingo 本地转写与纪要"
+    }))
+}
+
+/// 绑定当前选择的录音豆：严格连接 + 读序列号，确认是这台才写入配置。
+async fn bean_bind(
+    State(s): State<Shared>,
+    Json(req): Json<BeanReq>,
+) -> ApiResult<Json<Value>> {
+    let _bean_guard = bean_lock_guard(&s).await?;
+    if s.config().bean.is_bound() {
+        return Err(bad(tr(
+            "已经绑定录音豆，请先解绑再绑定其他设备",
+            "A recorder is already bound. Unbind it before binding another",
+        )));
+    }
+    let target = req.target.as_deref().unwrap_or("").trim();
+    if target.is_empty() {
+        return Err(bad(tr(
+            "请先扫描并选择一台录音豆",
+            "Scan and select a recorder first",
+        )));
+    }
+
+    // 快路径：前端扫描后已用严格连接逐台 probe 并读到序列号，绑定无需再连一次设备。
+    // WinRT 对刚断开的设备二次连接最容易挂起（表现为「点了没反应」/45 秒超时），
+    // 而后续 info/files/import 仍会按这里写入的序列号复核，连错设备照样会被拒绝。
+    if let Some(serial) = req.serial.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let binding = config::BeanConfig {
+            target: target.into(),
+            name: req.name.as_deref().unwrap_or("").trim().into(),
+            mac: req.mac.as_deref().unwrap_or("").trim().into(),
+            serial: serial.into(),
+            bound_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        };
+        let mut cfg = s.config();
+        cfg.bean = binding.clone();
+        config::save(&s.opt.config_path, &cfg).map_err(|e| bad(e.to_string()))?;
+        return Ok(Json(json!({ "bound": true, "binding": bean_binding_json(&binding) })));
+    }
+
+    // 兼容路径：老前端或手工调用没带 serial 时，仍严格连接读一次设备信息。
+    // 加 35 秒硬超时，确保任何 WinRT 挂起都会返回明确错误而不是无声卡死。
+    let (info, client) = tokio::time::timeout(Duration::from_secs(35), async {
+        let mut client = crate::bean::client::BeanClient::connect_strict(target)
+            .await
+            .map_err(|e| e.to_string())?;
+        let info = client.device_info().await?;
+        Ok::<_, String>((info, client))
+    })
+    .await
+    .map_err(|_| {
+        bad(tr(
+            "绑定设备耗时过长，请重新扫描后再试（设备可能被手机占用）",
+            "Binding timed out — rescan and retry (the recorder may be in use by a phone)",
+        ))
+    })?
+    .map_err(bad)?;
+    // 前端扫描后已读到这台设备的序列号；连上后若对不上，说明连到了旁边同型号的另一台，
+    // 直接拒绝绑定，绝不让「点 A 绑成 B」发生。
+    if let Some(expect_raw) = req
+        .expect_serial
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let expect = norm_bean_id(expect_raw);
+        let actual = norm_bean_id(&info.serial_number);
+        if !expect.is_empty() && !actual.is_empty() && actual != expect {
+            let _ = client.close().await;
+            return Err(bad(tr(
+                &format!(
+                    "连到的设备序列号是 {}，与所选设备（{}）不一致，请重试或靠近目标设备",
+                    info.serial_number, expect_raw
+                ),
+                &format!(
+                    "Connected device serial {} does not match the selected one ({}); retry or move closer",
+                    info.serial_number, expect_raw
+                ),
+            )));
+        }
+    }
+    let binding = config::BeanConfig {
+        target: target.into(),
+        name: req.name.as_deref().unwrap_or("").trim().into(),
+        mac: req.mac.as_deref().unwrap_or("").trim().into(),
+        serial: info.serial_number.trim().into(),
+        bound_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    };
+    let _ = client.close().await;
+
+    let mut cfg = s.config();
+    cfg.bean = binding.clone();
+    config::save(&s.opt.config_path, &cfg).map_err(|e| bad(e.to_string()))?;
+    Ok(Json(json!({ "bound": true, "binding": bean_binding_json(&binding) })))
+}
+
+/// 解绑：只清空配置里的绑定关系，设备本身不需要做任何操作。
+async fn bean_unbind(State(s): State<Shared>) -> ApiResult<Json<Value>> {
+    let mut cfg = s.config();
+    cfg.bean = config::BeanConfig::default();
+    config::save(&s.opt.config_path, &cfg).map_err(|e| bad(e.to_string()))?;
+    Ok(Json(json!({ "bound": false, "binding": bean_binding_json(&config::BeanConfig::default()) })))
+}
+
+async fn bean_selftest() -> ApiResult<Json<Value>> {
+    let report = tokio::task::spawn_blocking(crate::bean::selftest::run_selftest)
+        .await
+        .map_err(|e| bad(e.to_string()))?
+        .map_err(bad)?;
+    Ok(Json(report))
+}
+
+/// 读序列号探针：广播包里只有 MAC，序列号必须连上设备读信息帧。
+/// 单独成接口由前端串行调用，避免和「绑定」并发打同一台设备（WinRT GATT 冲突会双挂）。
+async fn bean_probe(
+    State(s): State<Shared>,
+    Json(req): Json<BeanReq>,
+) -> ApiResult<Json<Value>> {
+    let _bean_guard = bean_lock_guard(&s).await?;
+    if s.config().bean.is_bound() {
+        return Err(bad(tr(
+            "已绑定录音豆，无需探测其他设备",
+            "A recorder is already bound — no need to probe another",
+        )));
+    }
+    let target = req.target.as_deref().unwrap_or("").trim().to_string();
+    if target.is_empty() {
+        return Err(bad(tr("缺少设备标识", "Missing device target")));
+    }
+    let info = tokio::time::timeout(Duration::from_secs(18), async {
+        // 必须严格连接：宽松连接会"连附近任意一台"，读到的序列号会显示在错误的卡片上，
+        // 比读取失败更糟——老板会照着错的序列号去绑定。
+        let mut client = crate::bean::client::BeanClient::connect_strict(&target)
+            .await
+            .map_err(|e| e.to_string())?;
+        let info = client.device_info().await;
+        let _ = client.close().await;
+        info
+    })
+    .await
+    .map_err(|_| {
+        bad(tr(
+            "读取序列号超时：设备可能被手机占用或已离开范围",
+            "Reading serial timed out — the recorder may be used by a phone or out of range",
+        ))
+    })?
+    .map_err(bad)?;
+    Ok(Json(json!({
+        "serial": info.serial_number,
+        "battery": info.battery,
+        "firmwareVersion": info.firmware_version,
+        "recording": info.recording,
+    })))
+}
+
+async fn bean_scan(State(s): State<Shared>) -> ApiResult<Json<Value>> {
+    let _bean_guard = bean_lock_guard(&s).await?;
+    // 硬超时：扫描正常 3 秒完成，WinRT 偶发挂起时 20 秒必须返回，
+    // 否则前端超时后锁一直被占，后续重试全部排队卡死。
+    let devices = tokio::time::timeout(
+        Duration::from_secs(20),
+        crate::bean::ble::scan(Duration::from_secs(3)),
+    )
+    .await
+    .map_err(|_| {
+        bad(tr(
+            "扫描超时：请确认蓝牙已开启、录音豆未在充电盒内且未被手机 App 占用",
+            "Scan timed out — check Bluetooth is on, the recorder is out of its case and not used by a phone app",
+        ))
+    })?
+    .map_err(bad)?;
+    Ok(Json(json!({"devices": devices})))
+}
+
+#[axum::debug_handler]
+async fn bean_info(
+    State(s): State<Shared>,
+    Json(req): Json<BeanReq>,
+) -> ApiResult<Json<Value>> {
+    let _bean_guard = bean_lock_guard(&s).await?;
+    let target = resolve_bean_target(&s, &req)?;
+    let mut client = crate::bean::client::BeanClient::connect(&target)
+        .await
+        .map_err(bad)?;
+    let result = client.device_info().await;
+    let _ = client.close().await;
+    let info = result.map_err(bad)?;
+    assert_bean_serial(&info, &s.config().bean)?;
+    Ok(Json(json!({"device": info})))
+}
+
+/// 一次连接同时读设备信息与录音清单。
+/// 旧实现让前端分两次请求 info + files，各自建立 GATT 连接；WinRT 对刚断开的设备
+/// 二次连接极易挂起，且 files 内部还会再读一次设备信息，累计耗时很容易撞上前端
+/// 45 秒超时（表现为"读取录音列表耗时过长"）。合并后只连一次、只读一次信息帧。
+async fn bean_snapshot(
+    State(s): State<Shared>,
+    Json(req): Json<BeanReq>,
+) -> ApiResult<Json<Value>> {
+    let _bean_guard = bean_lock_guard(&s).await?;
+    let target = resolve_bean_target(&s, &req)?;
+    let binding = s.config().bean;
+    let (info, files) = tokio::time::timeout(Duration::from_secs(38), async {
+        let mut client = crate::bean::client::BeanClient::connect(&target)
+            .await
+            .map_err(|e| e.to_string())?;
+        let info = client.device_info().await?;
+        // 绑定后每次业务请求都复核序列号，防止连到旁边同型号设备。
+        let actual = norm_bean_id(&info.serial_number);
+        let expect = norm_bean_id(binding.serial.trim());
+        if !expect.is_empty() && !actual.is_empty() && actual != expect {
+            let _ = client.close().await;
+            return Err(format!(
+                "连到的设备序列号是 {}，与绑定的 {} 不一致，请只保留目标设备开机后重试",
+                info.serial_number, binding.serial
+            ));
+        }
+        let files = client.list_files().await?;
+        let _ = client.close().await;
+        Ok::<_, String>((info, files))
+    })
+    .await
+    .map_err(|_| {
+        bad(tr(
+            "读取设备与录音列表耗时过长，请靠近设备、关闭手机 App 后重试",
+            "Reading device and recordings timed out — move closer and close phone apps",
+        ))
+    })?
+    .map_err(bad)?;
+    Ok(Json(json!({ "device": info, "files": files })))
+}
+
+async fn bean_files(
+    State(s): State<Shared>,
+    Json(req): Json<BeanReq>,
+) -> ApiResult<Json<Value>> {
+    let _bean_guard = bean_lock_guard(&s).await?;
+    let target = resolve_bean_target(&s, &req)?;
+    let binding = s.config().bean;
+    let mut client = crate::bean::client::BeanClient::connect(&target)
+        .await
+        .map_err(bad)?;
+    let result = match verify_bound_serial(&mut client, &binding).await {
+        Ok(()) => client.list_files().await,
+        Err(e) => Err(e.1),
+    };
+    let _ = client.close().await;
+    let files = result.map_err(bad)?;
+    Ok(Json(json!({"files": files})))
+}
+
+/// 从录音豆导入一个离线文件：拉流 → 解密 → 16 kHz wav → 现有 ASR/纪要流水线。
+async fn bean_import(
+    State(s): State<Shared>,
+    Json(req): Json<BeanReq>,
+) -> ApiResult<Json<Value>> {
+    let _bean_guard = bean_lock_guard(&s).await?;
+    let file_id = req
+        .file_id
+        .ok_or_else(|| bad(tr("缺少文件 ID", "Missing file ID")))?;
+    let target = resolve_bean_target(&s, &req)?;
+    let binding = s.config().bean;
+    // 连接 + 序列号复核 + 文件清单同样加硬超时：避免二次连接挂起后
+    // 只能等前端 45 秒兜底，且失败时给出明确原因。
+    let (files, mut client) = tokio::time::timeout(Duration::from_secs(38), async {
+        let mut client = crate::bean::client::BeanClient::connect(&target)
+            .await
+            .map_err(|e| e.to_string())?;
+        let info = client.device_info().await?;
+        let actual = norm_bean_id(&info.serial_number);
+        let expect = norm_bean_id(binding.serial.trim());
+        if !expect.is_empty() && !actual.is_empty() && actual != expect {
+            return Err(format!(
+                "连到的设备序列号是 {}，与绑定的 {} 不一致，请只保留目标设备开机后重试",
+                info.serial_number, binding.serial
+            ));
+        }
+        let files = client.list_files().await?;
+        Ok::<_, String>((files, client))
+    })
+    .await
+    .map_err(|_| {
+        bad(tr(
+            "连接录音豆并读取文件清单耗时过长，请靠近设备后重试",
+            "Connecting and listing files timed out — move closer and retry",
+        ))
+    })?
+    .map_err(bad)?;
+    let file = match files.files.iter().find(|f| f.file_id == file_id).cloned() {
+        Some(f) => f,
+        None => {
+            let _ = client.close().await;
+            return Err(bad(tr("录音豆上找不到该文件", "File not found on recorder")));
+        }
+    };
+
+    let when = file
+        .end_time
+        .and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
+        .map(|d| d.with_timezone(&chrono::Local).naive_local())
+        .unwrap_or_else(|| chrono::Local::now().naive_local());
+    let dir = meetings::new_folder(
+        &s.root(),
+        req.title.as_deref().unwrap_or(&file.title),
+        when,
+    );
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let job = Job::new("process", &name, "saving");
+    s.start_job(job.clone())?;
+    std::fs::create_dir_all(&dir).map_err(|e| bad(e.to_string()))?;
+    let audio = dir.join("录音.wav");
+
+    let report = client
+        .pull_file(
+            &file,
+            &audio,
+            req.delete_after_import.unwrap_or(false),
+        )
+        .await;
+    let _ = client.close().await;
+    let report = report.map_err(bad)?;
+    let audio_for_job = audio.clone();
+    let dir_for_job = dir.clone();
+    spawn_job(&s, &job.id, move |st, id| {
+        st.run_process(id, &audio_for_job, &dir_for_job, &[])
+    });
+    Ok(Json(json!({"job": job, "bean": report})))
 }
 
 pub fn router(state: Shared) -> Router {
@@ -2155,6 +2620,16 @@ pub fn router(state: Shared) -> Router {
         .route("/api/record/mark", post(record_mark))
         .route("/api/live", get(live_lines))
         .route("/api/import", post(import_file))
+        .route("/api/bean/status", get(bean_status))
+        .route("/api/bean/scan", post(bean_scan))
+        .route("/api/bean/probe", post(bean_probe))
+        .route("/api/bean/bind", post(bean_bind))
+        .route("/api/bean/unbind", post(bean_unbind))
+        .route("/api/bean/info", post(bean_info))
+        .route("/api/bean/snapshot", post(bean_snapshot))
+        .route("/api/bean/files", post(bean_files))
+        .route("/api/bean/import", post(bean_import))
+        .route("/api/bean/selftest", post(bean_selftest))
         .route("/api/job", get(get_job))
         .route("/api/job/dismiss", post(dismiss))
         .route("/api/jobs", get(get_jobs))
@@ -2191,7 +2666,8 @@ pub async fn serve_state(
     }))
 }
 
-#[cfg(test)]
+// 这批测试用 /bin/sh 假 recorder + Unix 权限位，只在 Unix 上可运行。
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -2546,5 +3022,88 @@ mod tests {
     fn demo_folder_names() {
         assert_eq!(demo_folder(false), "2026-10-28_1400_示例·注册转化复盘");
         assert_eq!(demo_folder(true), "2026-10-28_1400_Sample_·_Signup_conversion_review");
+    }
+}
+
+/// 绑定状态机测试：不碰蓝牙硬件，只验证"绑定后锁定目标 / 解绑后恢复自由"。
+#[cfg(test)]
+mod bean_binding_tests {
+    use super::*;
+
+    fn test_state(name: &str) -> (Shared, PathBuf) {
+        let base = std::env::temp_dir().join(format!("tingo-bean-bind-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let state = AppState::new(Options {
+            root: base.join("root"),
+            config_path: base.join("config.toml"),
+            models_dir: base.join("models"),
+            recorder_bin: base.join("recorder"),
+            version: "0.0.0".into(),
+            sample_dir: base.join("sample"),
+        });
+        (state, base)
+    }
+
+    #[tokio::test]
+    async fn binding_locks_target_until_unbound() {
+        let (s, base) = test_state("lock");
+        let status = bean_status(State(s.clone())).await;
+        assert_eq!(status.0["binding"]["bound"], json!(false));
+
+        // 没选设备时绑定必须报错，而不是随便连一台。
+        assert!(bean_bind(State(s.clone()), Json(BeanReq::default())).await.is_err());
+
+        let mut cfg = s.config();
+        cfg.bean = config::BeanConfig {
+            target: "soundcore Work".into(),
+            name: "soundcore Work".into(),
+            serial: "D3200000123".into(),
+            ..Default::default()
+        };
+        config::save(&s.opt.config_path, &cfg).unwrap();
+
+        // 已绑定：请求别的设备会被拒绝；同一台（大小写/空格不同）放行并强制用绑定目标。
+        let other = BeanReq { target: Some("另一台录音豆".into()), ..Default::default() };
+        assert!(resolve_bean_target(&s, &other).is_err());
+        let same = BeanReq { target: Some("  SOUNDCORE  Work ".into()), ..Default::default() };
+        assert_eq!(resolve_bean_target(&s, &same).unwrap(), "soundcore Work");
+        let empty = BeanReq::default();
+        assert_eq!(resolve_bean_target(&s, &empty).unwrap(), "soundcore Work");
+
+        // 解绑后重新自由选择。
+        let _ = bean_unbind(State(s.clone())).await.unwrap();
+        assert!(!s.config().bean.is_bound());
+        assert_eq!(resolve_bean_target(&s, &other).unwrap(), "另一台录音豆");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// 真机序列号（含字母、大写、12 位十六进制样式）必须能跨大小写/分隔符比对。
+    /// 老板的录音豆序列号为 7CE91361910B；设备回显可能是小写或带空格。
+    #[test]
+    fn serial_with_letters_normalizes_case_and_separators() {
+        let bound = config::BeanConfig {
+            serial: "7CE91361910B".into(),
+            ..Default::default()
+        };
+        let mut info = crate::bean::models::DeviceInfo::default();
+        info.serial_number = "7ce9 1361-910B".into();
+        assert!(assert_bean_serial(&info, &bound).is_ok());
+
+        info.serial_number = "7CE91361910C".into();
+        assert!(assert_bean_serial(&info, &bound).is_err());
+    }
+
+    /// 同名设备必须靠 MAC/序列号区分：前端 deviceTarget 取 MAC 而非名字。
+    /// 这里固化"名字相同但 MAC 不同 → 归一化后仍不同"的判定基础。
+    #[test]
+    fn same_name_devices_differ_by_mac() {
+        let a = norm_bean_id("A4:C1:38:11:22:33");
+        let b = norm_bean_id("A4:C1:38:44:55:66");
+        assert_eq!(a, "a4c138112233");
+        assert_eq!(b, "a4c138445566");
+        assert_ne!(a, b);
+        // 名字相同（归一化后完全一致）——正因如此绝不能拿名字当唯一标识。
+        assert_eq!(norm_bean_id("soundcore Work"), norm_bean_id("soundcore work"));
     }
 }
